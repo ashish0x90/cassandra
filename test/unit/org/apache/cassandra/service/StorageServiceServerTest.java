@@ -37,6 +37,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.schema.LegacySchemaTables;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -98,7 +99,7 @@ public class StorageServiceServerTest
     public void testColumnFamilySnapshot() throws IOException
     {
         // no need to insert extra data, even an "empty" database will have a little information in the system keyspace
-        StorageService.instance.takeColumnFamilySnapshot(SystemKeyspace.NAME, SystemKeyspace.SCHEMA_KEYSPACES_TABLE, "cf_snapshot");
+        StorageService.instance.takeColumnFamilySnapshot(SystemKeyspace.NAME, LegacySchemaTables.KEYSPACES, "cf_snapshot");
     }
 
     @Test
@@ -475,8 +476,6 @@ public class StorageServiceServerTest
         metadata.updateNormalToken(new LongToken(3000L), InetAddress.getByName("127.0.0.3"));
         metadata.updateNormalToken(new LongToken(4000L), InetAddress.getByName("127.0.0.4"));
 
-        Map<String, String> configOptions = new HashMap<String, String>();
-        configOptions.put("replication_factor", "3");
         Collection<Range<Token>> repairRangeFrom = StorageService.instance.createRepairRangeFrom("1500", "3700");
         assert repairRangeFrom.size() == 3;
         assert repairRangeFrom.contains(new Range<Token>(new LongToken(1500L), new LongToken(2000L)));

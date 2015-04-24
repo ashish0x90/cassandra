@@ -52,9 +52,9 @@ public class MultiColumnRelationTest extends CQLTester
                                  "SELECT * FROM %s WHERE a = 0 AND (b, c) > (?, ?)", 1, null);
 
             // Wrong order of columns
-            assertInvalidMessage("Clustering columns may not be skipped in multi-column relations. They should appear in the PRIMARY KEY order. Got (d, c, b) = (?, ?, ?)",
+            assertInvalidMessage("Clustering columns must appear in the PRIMARY KEY order in multi-column relations: (d, c, b) = (?, ?, ?)",
                                  "SELECT * FROM %s WHERE a = 0 AND (d, c, b) = (?, ?, ?)", 0, 0, 0);
-            assertInvalidMessage("Clustering columns may not be skipped in multi-column relations. They should appear in the PRIMARY KEY order. Got (d, c, b) > (?, ?, ?)",
+            assertInvalidMessage("Clustering columns must appear in the PRIMARY KEY order in multi-column relations: (d, c, b) > (?, ?, ?)",
                                  "SELECT * FROM %s WHERE a = 0 AND (d, c, b) > (?, ?, ?)", 0, 0, 0);
 
             // Wrong number of values
@@ -64,13 +64,13 @@ public class MultiColumnRelationTest extends CQLTester
                                  "SELECT * FROM %s WHERE a=0 AND (b, c, d) IN ((?, ?, ?, ?, ?))", 0, 1, 2, 3, 4);
 
             // Missing first clustering column
-            assertInvalidMessage("Clustering columns may not be skipped in multi-column relations. They should appear in the PRIMARY KEY order. Got (c, d) = (?, ?)",
+            assertInvalidMessage("PRIMARY KEY column \"c\" cannot be restricted as preceding column \"b\" is not restricted",
                                  "SELECT * FROM %s WHERE a = 0 AND (c, d) = (?, ?)", 0, 0);
-            assertInvalidMessage("Clustering columns may not be skipped in multi-column relations. They should appear in the PRIMARY KEY order. Got (c, d) > (?, ?)",
+            assertInvalidMessage("PRIMARY KEY column \"c\" cannot be restricted as preceding column \"b\" is not restricted",
                                  "SELECT * FROM %s WHERE a = 0 AND (c, d) > (?, ?)", 0, 0);
 
             // Nulls
-            assertInvalidMessage("Invalid null value in condition for column d",
+            assertInvalidMessage("Invalid null value in condition for columns: [b, c, d]",
                                  "SELECT * FROM %s WHERE a = 0 AND (b, c, d) IN ((?, ?, ?))", 1, 2, null);
 
             // Wrong type for 'd'
@@ -89,14 +89,200 @@ public class MultiColumnRelationTest extends CQLTester
 
             assertInvalidMessage("Multi-column relations can only be applied to clustering columns but was applied to: a",
                                  "SELECT * FROM %s WHERE (a, b, c, d) IN ((?, ?, ?, ?))", 0, 1, 2, 3);
-            assertInvalidMessage("Clustering columns may not be skipped in multi-column relations. They should appear in the PRIMARY KEY order. Got (c, d) IN ((?, ?))",
+            assertInvalidMessage("PRIMARY KEY column \"c\" cannot be restricted as preceding column \"b\" is not restricted",
                                  "SELECT * FROM %s WHERE (c, d) IN ((?, ?))", 0, 1);
 
-            assertInvalidMessage("Mixing single column relations and multi column relations on clustering columns is not allowed",
-                                 "SELECT * FROM %s WHERE a = ? AND (b, c) in ((?, ?), (?, ?)) AND d > ?",
-                                 0, 0, 0, 0, 0, 0);
+            assertInvalidMessage("Clustering column \"c\" cannot be restricted (preceding column \"b\" is restricted by a non-EQ relation)",
+                                 "SELECT * FROM %s WHERE a = ? AND b > ?  AND (c, d) IN ((?, ?))", 0, 0, 0, 0);
 
-            assertInvalid("SELECT * FROM %s WHERE a = ? AND (b, c) in ((?, ?), (?, ?)) AND d > ?", 0, 0, 0, 0, 0, 0);
+            assertInvalidMessage("Clustering column \"c\" cannot be restricted (preceding column \"b\" is restricted by a non-EQ relation)",
+                                 "SELECT * FROM %s WHERE a = ? AND b > ?  AND (c, d) > (?, ?)", 0, 0, 0, 0);
+            assertInvalidMessage("PRIMARY KEY column \"c\" cannot be restricted (preceding column \"b\" is restricted by a non-EQ relation)",
+                                 "SELECT * FROM %s WHERE a = ? AND (c, d) > (?, ?) AND b > ?  ", 0, 0, 0, 0);
+            assertInvalidMessage("Column \"c\" cannot be restricted by two tuple-notation inequalities not starting with the same column",
+                                 "SELECT * FROM %s WHERE a = ? AND (b, c) > (?, ?) AND (b) < (?) AND (c) < (?)", 0, 0, 0, 0, 0);
+            assertInvalidMessage("Column \"c\" cannot be restricted by two tuple-notation inequalities not starting with the same column",
+                                 "SELECT * FROM %s WHERE a = ? AND (c) < (?) AND (b, c) > (?, ?) AND (b) < (?)", 0, 0, 0, 0, 0);
+            assertInvalidMessage("Clustering column \"c\" cannot be restricted (preceding column \"b\" is restricted by a non-EQ relation)",
+                                 "SELECT * FROM %s WHERE a = ? AND (b) < (?) AND (c) < (?) AND (b, c) > (?, ?)", 0, 0, 0, 0, 0);
+
+            assertInvalidMessage("Column \"c\" cannot be restricted by two tuple-notation inequalities not starting with the same column",
+                                 "SELECT * FROM %s WHERE a = ? AND (b, c) > (?, ?) AND (c) < (?)", 0, 0, 0, 0);
+        }
+    }
+
+    @Test
+    public void testMultiAndSingleColumnRelationMix() throws Throwable
+    {
+        for (String compactOption : new String[]{"", " WITH COMPACT STORAGE"})
+        {
+            createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b, c, d))" + compactOption);
+
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 0, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 1, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 1, 1);
+
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 0, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 1, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 1, 1);
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c, d) = (?, ?)", 0, 1, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b IN (?, ?) and (c, d) = (?, ?)", 0, 0, 1, 0, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c) IN ((?))", 0, 1, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b IN (?, ?) and (c) IN ((?))", 0, 0, 1, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c) IN ((?), (?))", 0, 1, 0, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c, d) IN ((?, ?))", 0, 1, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c, d) IN ((?, ?), (?, ?))", 0, 1, 0, 0, 1, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b IN (?, ?) and (c, d) IN ((?, ?), (?, ?))", 0, 0, 1, 0, 0, 1, 1),
+                       row(0, 0, 0, 0),
+                       row(0, 0, 1, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c, d) > (?, ?)", 0, 1, 0, 0),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b IN (?, ?) and (c, d) > (?, ?)", 0, 0, 1, 0, 0),
+                       row(0, 0, 1, 0),
+                       row(0, 0, 1, 1),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c, d) > (?, ?) and (c) <= (?) ", 0, 1, 0, 0, 1),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c, d) >= (?, ?) and (c, d) < (?, ?)", 0, 1, 0, 0, 1, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b, c) = (?, ?) and d = ?", 0, 0, 1, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b, c) IN ((?, ?), (?, ?)) and d = ?", 0, 0, 1, 0, 0, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c) = (?) and d = ?", 0, 0, 1, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b, c) = (?, ?) and d IN (?, ?)", 0, 0, 1, 0, 2),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and b = ? and (c) = (?) and d IN (?, ?)", 0, 0, 1, 0, 2),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b, c) = (?, ?) and d >= ?", 0, 0, 1, 0),
+                       row(0, 0, 1, 0),
+                       row(0, 0, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and d < 1 and (b, c) = (?, ?) and d >= ?", 0, 0, 1, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and d < 1 and (b, c) IN ((?, ?), (?, ?)) and d >= ?", 0, 0, 1, 0, 0, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 0, 1, 0));
+        }
+    }
+
+    @Test
+    public void testSeveralMultiColumnRelation() throws Throwable
+    {
+        for (String compactOption : new String[]{"", " WITH COMPACT STORAGE"})
+        {
+            createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b, c, d))" + compactOption);
+
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 0, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 1, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 1, 1);
+
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 0, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 1, 0);
+            execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 1, 1);
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c, d) = (?, ?)", 0, 1, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) IN ((?), (?)) and (c, d) = (?, ?)", 0, 0, 1, 0, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c) IN ((?))", 0, 1, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) IN ((?),(?)) and (c) IN ((?))", 0, 0, 1, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c) IN ((?), (?))", 0, 1, 0, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c, d) IN ((?, ?))", 0, 1, 0, 0),
+                       row(0, 1, 0, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c, d) IN ((?, ?), (?, ?))", 0, 1, 0, 0, 1, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) IN ((?), (?)) and (c, d) IN ((?, ?), (?, ?))", 0, 0, 1, 0, 0, 1, 1),
+                       row(0, 0, 0, 0),
+                       row(0, 0, 1, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c, d) > (?, ?)", 0, 1, 0, 0),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) IN ((?),(?)) and (c, d) > (?, ?)", 0, 0, 1, 0, 0),
+                       row(0, 0, 1, 0),
+                       row(0, 0, 1, 1),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c, d) > (?, ?) and (c) <= (?) ", 0, 1, 0, 0, 1),
+                       row(0, 1, 1, 0),
+                       row(0, 1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b) = (?) and (c, d) >= (?, ?) and (c, d) < (?, ?)", 0, 1, 0, 0, 1, 1),
+                       row(0, 1, 0, 0),
+                       row(0, 1, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b, c) = (?, ?) and d = ?", 0, 0, 1, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (b, c) IN ((?, ?), (?, ?)) and d = ?", 0, 0, 1, 0, 0, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (d) < (1) and (b, c) = (?, ?) and (d) >= (?)", 0, 0, 1, 0),
+                       row(0, 0, 1, 0));
+
+            assertRows(execute("SELECT * FROM %s WHERE a = ? and (d) < (1) and (b, c) IN ((?, ?), (?, ?)) and (d) >= (?)", 0, 0, 1, 0, 0, 0),
+                       row(0, 0, 0, 0),
+                       row(0, 0, 1, 0));
         }
     }
 
@@ -590,74 +776,161 @@ public class MultiColumnRelationTest extends CQLTester
         createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, PRIMARY KEY (a, b, c, d))");
         createIndex("CREATE INDEX ON %s (b)");
         createIndex("CREATE INDEX ON %s (e)");
-
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 0, 0, 0);
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 1, 0, 1);
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 1, 1, 2);
-
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 1, 0, 0, 0);
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 1, 1, 0, 1);
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 1, 1, 1, 2);
-
         execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 2, 0, 0, 0);
-
         assertRows(execute("SELECT * FROM %s WHERE (b) = (?)", 1),
                    row(0, 1, 0, 0, 0),
                    row(0, 1, 1, 0, 1),
                    row(0, 1, 1, 1, 2));
 
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b, c) = (?, ?)", 1, 1);
         assertRows(execute("SELECT * FROM %s WHERE (b, c) = (?, ?) ALLOW FILTERING", 1, 1),
                    row(0, 1, 1, 0, 1),
                    row(0, 1, 1, 1, 2));
 
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b, c) = (?, ?) AND e = ?", 1, 1, 2);
         assertRows(execute("SELECT * FROM %s WHERE (b, c) = (?, ?) AND e = ? ALLOW FILTERING", 1, 1, 2),
                    row(0, 1, 1, 1, 2));
 
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b) IN ((?)) AND e = ?", 1, 2);
         assertRows(execute("SELECT * FROM %s WHERE (b) IN ((?)) AND e = ? ALLOW FILTERING", 1, 2),
                    row(0, 1, 1, 1, 2));
 
-        assertInvalidMessage("IN restrictions are not supported on indexed columns",
-                             "SELECT * FROM %s WHERE (b) IN ((?), (?)) AND e = ? ALLOW FILTERING", 0, 1, 2);
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b) IN ((?), (?)) AND e = ?", 0, 1, 2);
+        assertRows(execute("SELECT * FROM %s WHERE (b) IN ((?), (?)) AND e = ? ALLOW FILTERING", 0, 1, 2),
+                   row(0, 0, 1, 1, 2),
+                   row(0, 1, 1, 1, 2));
 
-        assertInvalidMessage("IN restrictions are not supported on indexed columns",
-                             "SELECT * FROM %s WHERE (b, c) IN ((?, ?)) AND e = ? ALLOW FILTERING", 0, 1, 2);
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b, c) IN ((?, ?)) AND e = ?", 0, 1, 2);
+        assertRows(execute("SELECT * FROM %s WHERE (b, c) IN ((?, ?)) AND e = ? ALLOW FILTERING", 0, 1, 2),
+                   row(0, 0, 1, 1, 2));
 
-        assertInvalidMessage("IN restrictions are not supported on indexed columns",
-                             "SELECT * FROM %s WHERE (b, c) IN ((?, ?), (?, ?)) AND e = ? ALLOW FILTERING", 0, 1, 1, 1, 2);
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b, c) IN ((?, ?), (?, ?)) AND e = ?", 0, 1, 1, 1, 2);
+        assertRows(execute("SELECT * FROM %s WHERE (b, c) IN ((?, ?), (?, ?)) AND e = ? ALLOW FILTERING", 0, 1, 1, 1, 2),
+                   row(0, 0, 1, 1, 2),
+                   row(0, 1, 1, 1, 2));
 
-        assertInvalidMessage("Slice restrictions are not supported on indexed columns which are part of a multi column relation",
-                             "SELECT * FROM %s WHERE (b) >= (?) AND e = ? ALLOW FILTERING", 1, 2);
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b) >= (?) AND e = ?", 1, 2);
+        assertRows(execute("SELECT * FROM %s WHERE (b) >= (?) AND e = ? ALLOW FILTERING", 1, 2),
+                   row(0, 1, 1, 1, 2));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE (b, c) >= (?, ?) AND e = ?", 1, 1, 2);
+        assertRows(execute("SELECT * FROM %s WHERE (b, c) >= (?, ?) AND e = ? ALLOW FILTERING", 1, 1, 2),
+                   row(0, 1, 1, 1, 2));
     }
 
     @Test
     public void testMultiplePartitionKeyAndMultiClusteringWithIndex() throws Throwable
     {
-        createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, PRIMARY KEY ((a, b), c, d, e))");
+        createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, f int, PRIMARY KEY ((a, b), c, d, e))");
         createIndex("CREATE INDEX ON %s (c)");
+        createIndex("CREATE INDEX ON %s (f)");
 
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 0, 0, 0);
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 0, 1, 0);
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 0, 1, 1);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 0, 0, 0, 0);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 0, 1, 0, 1);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 0, 1, 1, 2);
 
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 1, 0, 0);
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 1, 1, 0);
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 1, 1, 1);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 1, 0, 0, 3);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 1, 1, 0, 4);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 1, 1, 1, 5);
 
-        execute("INSERT INTO %s (a, b, c, d, e) VALUES (?, ?, ?, ?, ?)", 0, 0, 2, 0, 0);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 2, 0, 0, 5);
 
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c) = (?)");
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c) = (?) ALLOW FILTERING", 0, 1),
-                   row(0, 0, 1, 0, 0),
-                   row(0, 0, 1, 1, 0),
-                   row(0, 0, 1, 1, 1));
+                   row(0, 0, 1, 0, 0, 3),
+                   row(0, 0, 1, 1, 0, 4),
+                   row(0, 0, 1, 1, 1, 5));
 
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c, d) = (?, ?)", 0, 1, 1);
         assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c, d) = (?, ?) ALLOW FILTERING", 0, 1, 1),
-                   row(0, 0, 1, 1, 0),
-                   row(0, 0, 1, 1, 1));
+                   row(0, 0, 1, 1, 0, 4),
+                   row(0, 0, 1, 1, 1, 5));
 
         assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
                              "SELECT * FROM %s WHERE a = ? AND (c, d) IN ((?, ?)) ALLOW FILTERING", 0, 1, 1);
 
         assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
                              "SELECT * FROM %s WHERE a = ? AND (c, d) >= (?, ?) ALLOW FILTERING", 0, 1, 1);
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c) IN ((?)) AND f = ?", 0, 1, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c) IN ((?)) AND f = ? ALLOW FILTERING", 0, 1, 5),
+                   row(0, 0, 1, 1, 1, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c) IN ((?), (?)) AND f = ?", 0, 1, 2, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c) IN ((?), (?)) AND f = ? ALLOW FILTERING", 0, 1, 2, 5),
+                   row(0, 0, 1, 1, 1, 5),
+                   row(0, 0, 2, 0, 0, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c, d) IN ((?, ?)) AND f = ?", 0, 1, 0, 3);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c, d) IN ((?, ?)) AND f = ? ALLOW FILTERING", 0, 1, 0, 3),
+                   row(0, 0, 1, 0, 0, 3));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c) >= (?) AND f = ?", 0, 1, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c) >= (?) AND f = ? ALLOW FILTERING", 0, 1, 5),
+                   row(0, 0, 1, 1, 1, 5),
+                   row(0, 0, 2, 0, 0, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND (c, d) >= (?, ?) AND f = ?", 0, 1, 1, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND (c, d) >= (?, ?) AND f = ? ALLOW FILTERING", 0, 1, 1, 5),
+                   row(0, 0, 1, 1, 1, 5),
+                   row(0, 0, 2, 0, 0, 5));
+    }
+
+    @Test
+    public void testINWithDuplicateValue() throws Throwable
+    {
+        for (String compactOption : new String[] { "", " WITH COMPACT STORAGE" })
+        {
+            createTable("CREATE TABLE %s (k1 int, k2 int, v int, PRIMARY KEY (k1, k2))" + compactOption);
+            execute("INSERT INTO %s (k1,  k2, v) VALUES (?, ?, ?)", 1, 1, 1);
+
+            assertRows(execute("SELECT * FROM %s WHERE k1 IN (?, ?) AND (k2) IN ((?), (?))", 1, 1, 1, 2),
+                       row(1, 1, 1));
+            assertRows(execute("SELECT * FROM %s WHERE k1 = ? AND (k2) IN ((?), (?))", 1, 1, 1),
+                       row(1, 1, 1));
+        }
+    }
+
+    @Test
+    public void testWithUnsetValues() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, i int, j int, s text, PRIMARY KEY(k,i,j))");
+        createIndex("CREATE INDEX s_index ON %s (s)");
+
+        assertInvalidMessage("Invalid unset value for tuple field number 0",
+                             "SELECT * from %s WHERE (i, j) = (?,?) ALLOW FILTERING", unset(), 1);
+        assertInvalidMessage("Invalid unset value for tuple field number 0",
+                             "SELECT * from %s WHERE (i, j) IN ((?,?)) ALLOW FILTERING", unset(), 1);
+        assertInvalidMessage("Invalid unset value for tuple field number 1",
+                             "SELECT * from %s WHERE (i, j) > (1,?) ALLOW FILTERING", unset());
+        assertInvalidMessage("Invalid unset value for tuple (i,j)",
+                             "SELECT * from %s WHERE (i, j) = ? ALLOW FILTERING", unset());
+        assertInvalidMessage("Invalid unset value for tuple (j)",
+                             "SELECT * from %s WHERE i = ? AND (j) > ? ALLOW FILTERING", 1, unset());
+        assertInvalidMessage("Invalid unset value for tuple (i,j)",
+                             "SELECT * from %s WHERE (i, j) IN (?, ?) ALLOW FILTERING", unset(), tuple(1, 1));
+        assertInvalidMessage("Invalid unset value for in(i,j)",
+                             "SELECT * from %s WHERE (i, j) IN ? ALLOW FILTERING", unset());
     }
 }

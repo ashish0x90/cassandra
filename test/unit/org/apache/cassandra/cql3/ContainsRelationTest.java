@@ -29,6 +29,9 @@ public class ContainsRelationTest extends CQLTester
         assertInvalidMessage("Unsupported null value for indexed column categories",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ?", "test", 5, null);
 
+        assertInvalidMessage("Unsupported unset value for indexed column categories",
+                             "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ?", "test", 5, unset());
+
         assertInvalidMessage("Cannot execute this query as it might involve data filtering and thus may have unpredictable performance. If you want to execute this query despite the performance unpredictability, use ALLOW FILTERING",
                              "SELECT * FROM %s WHERE account = ? AND categories CONTAINS ? AND categories CONTAINS ?", "xyz", "lmn", "notPresent");
         assertEmpty(execute("SELECT * FROM %s WHERE account = ? AND categories CONTAINS ? AND categories CONTAINS ? ALLOW FILTERING", "xyz", "lmn", "notPresent"));
@@ -59,11 +62,32 @@ public class ContainsRelationTest extends CQLTester
         assertInvalidMessage("Unsupported null value for indexed column categories",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ?", "test", 5, null);
 
+        assertInvalidMessage("Unsupported unset value for indexed column categories",
+                             "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ?", "test", 5, unset());
+
         assertInvalidMessage("Cannot execute this query as it might involve data filtering and thus may have unpredictable performance. If you want to execute this query despite the performance unpredictability, use ALLOW FILTERING",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ? AND categories CONTAINS ?",
                              "test", 5, "lmn", "notPresent");
         assertEmpty(execute("SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ? AND categories CONTAINS ? ALLOW FILTERING",
                             "test", 5, "lmn", "notPresent"));
+    }
+
+    @Test
+    public void testListContainsWithFiltering() throws Throwable
+    {
+        createTable("CREATE TABLE %s (e int PRIMARY KEY, f list<text>, s int)");
+        createIndex("CREATE INDEX ON %s(f)");
+        for(int i = 0; i < 3; i++)
+        {
+            execute("INSERT INTO %s (e, f, s) VALUES (?, ?, ?)", i, list("Dubai"), 4);
+        }
+        for(int i = 3; i < 5; i++)
+        {
+            execute("INSERT INTO %s (e, f, s) VALUES (?, ?, ?)", i, list("Dubai"), 3);
+        }
+        assertRows(execute("SELECT * FROM %s WHERE f CONTAINS ? AND s=? allow filtering", "Dubai", 3),
+                   row(3, list("Dubai"), 3),
+                   row(4, list("Dubai"), 3));
     }
 
     @Test
@@ -89,6 +113,9 @@ public class ContainsRelationTest extends CQLTester
 
         assertInvalidMessage("Unsupported null value for indexed column categories",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS KEY ?", "test", 5, null);
+
+        assertInvalidMessage("Unsupported unset value for indexed column categories",
+                             "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS KEY ?", "test", 5, unset());
 
         assertInvalidMessage("Cannot execute this query as it might involve data filtering and thus may have unpredictable performance. If you want to execute this query despite the performance unpredictability, use ALLOW FILTERING",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS KEY ? AND categories CONTAINS KEY ?",
@@ -125,6 +152,9 @@ public class ContainsRelationTest extends CQLTester
 
         assertInvalidMessage("Unsupported null value for indexed column categories",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ?", "test", 5, null);
+
+        assertInvalidMessage("Unsupported unset value for indexed column categories",
+                             "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ?", "test", 5, unset());
 
         assertInvalidMessage("Cannot execute this query as it might involve data filtering and thus may have unpredictable performance. If you want to execute this query despite the performance unpredictability, use ALLOW FILTERING",
                              "SELECT * FROM %s WHERE account = ? AND id = ? AND categories CONTAINS ? AND categories CONTAINS ?"

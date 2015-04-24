@@ -76,9 +76,8 @@ public final class JavaSourceUDFFactory
         // It is separated to allow return type and argument type checks during compile time via javassist.
         String codeExecInt = generateExecuteInternalMethod(argNames, body, javaReturnType, javaParamTypes);
 
-        if (logger.isDebugEnabled())
-            logger.debug("Generating java source UDF for {} with following c'tor and functions:\n{}\n{}\n{}",
-                         name, codeCtor, codeExecInt, codeExec);
+        logger.debug("Generating java source UDF for {} with following c'tor and functions:\n{}\n{}\n{}",
+                     name, codeCtor, codeExecInt, codeExec);
 
         try
         {
@@ -203,10 +202,10 @@ public final class JavaSourceUDFFactory
      *     }
      *     catch (Throwable t)
      *     {
-     *         logger.error("Invocation of function '{}' failed", this, t);
+     *         logger.debug("Invocation of function '{}' failed", this, t);
      *         if (t instanceof VirtualMachineError)
      *             throw (VirtualMachineError)t;
-     *         throw new org.apache.cassandra.exceptions.InvalidRequestException("Invocation of function '" + this + "' failed: " + t);
+     *         throw org.apache.cassandra.exceptions.FunctionExecutionException.build(this, t);
      *     }
      * }
      * </pre></code>
@@ -245,11 +244,11 @@ public final class JavaSourceUDFFactory
                     "  }\n" +
                     "  catch (Throwable t)\n" +
                     "  {\n" +
-                    "    logger.error(\"Invocation of function '{}' failed\", this, t);\n" +
+                    "    logger.debug(\"Invocation of function '{}' failed\", this, t);\n" +
                     // handle OutOfMemoryError and other fatals not here!
                     "    if (t instanceof VirtualMachineError)\n" +
                     "      throw (VirtualMachineError)t;\n" +
-                    "    throw new org.apache.cassandra.exceptions.InvalidRequestException(\"Invocation of function '\" + this + \"' failed: \" + t);\n" +
+                    "    throw org.apache.cassandra.exceptions.FunctionExecutionException.create(this, t);\n" +
                     "  }\n" +
                     "}");
 

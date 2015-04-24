@@ -21,17 +21,11 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.cql3.AbstractMarker;
-import org.apache.cassandra.cql3.Operator;
-import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.Term;
-import org.apache.cassandra.cql3.Tuples;
+import org.apache.cassandra.cql3.*;
+import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.statements.Bound;
 import org.apache.cassandra.db.IndexExpression;
-import org.apache.cassandra.db.composites.CBuilder;
-import org.apache.cassandra.db.composites.CType;
-import org.apache.cassandra.db.composites.Composite;
-import org.apache.cassandra.db.composites.Composites;
+import org.apache.cassandra.db.composites.CompositesBuilder;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.exceptions.InvalidRequestException;
@@ -41,18 +35,15 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.checkNotNu
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkTrue;
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 
-public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestrictions
+public abstract class MultiColumnRestriction extends AbstractRestriction
 {
-    protected final CType ctype;
-
     /**
      * The columns to which the restriction apply.
      */
     protected final List<ColumnDefinition> columnDefs;
 
-    public MultiColumnRestriction(CType ctype, List<ColumnDefinition> columnDefs)
+    public MultiColumnRestriction(List<ColumnDefinition> columnDefs)
     {
-        this.ctype = ctype;
         this.columnDefs = columnDefs;
     }
 
@@ -63,26 +54,32 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
     }
 
     @Override
+    public ColumnDefinition getFirstColumn()
+    {
+        return columnDefs.get(0);
+    }
+
+    @Override
+    public ColumnDefinition getLastColumn()
+    {
+        return columnDefs.get(columnDefs.size() - 1);
+    }
+
+    @Override
     public Collection<ColumnDefinition> getColumnDefs()
     {
         return columnDefs;
     }
 
     @Override
-    public List<ByteBuffer> values(QueryOptions options) throws InvalidRequestException
-    {
-        return Composites.toByteBuffers(valuesAsComposites(options));
-    }
-
-    @Override
-    public final PrimaryKeyRestrictions mergeWith(Restriction otherRestriction) throws InvalidRequestException
+    public final Restriction mergeWith(Restriction otherRestriction) throws InvalidRequestException
     {
             checkTrue(otherRestriction.isMultiColumn(),
                       "Mixing single column relations and multi column relations on clustering columns is not allowed");
-            return doMergeWith((PrimaryKeyRestrictions) otherRestriction);
+            return doMergeWith(otherRestriction);
     }
 
-    protected abstract PrimaryKeyRestrictions doMergeWith(PrimaryKeyRestrictions otherRestriction) throws InvalidRequestException;
+    protected abstract Restriction doMergeWith(Restriction otherRestriction) throws InvalidRequestException;
 
     /**
      * Returns the names of the columns that are specified within this <code>Restrictions</code> and the other one
@@ -92,10 +89,10 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
      * @return the names of the columns that are specified within this <code>Restrictions</code> and the other one
      * as a comma separated <code>String</code>.
      */
-    protected final String getColumnsInCommons(Restrictions otherRestrictions)
+    protected final String getColumnsInCommons(Restriction otherRestriction)
     {
         Set<ColumnDefinition> commons = new HashSet<>(getColumnDefs());
-        commons.retainAll(otherRestrictions.getColumnDefs());
+        commons.retainAll(otherRestriction.getColumnDefs());
         StringBuilder builder = new StringBuilder();
         for (ColumnDefinition columnDefinition : commons)
         {
@@ -119,7 +116,7 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
     }
 
     /**
-     * Check if this type of restriction is supported for the specified column by the specified index.
+     * Check if this type of restriction is supported for by the specified index.
      * @param index the Secondary index
      *
      * @return <code>true</code> this type of restriction is supported by the specified index,
@@ -131,9 +128,9 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
     {
         protected final Term value;
 
-        public EQ(CType ctype, List<ColumnDefinition> columnDefs, Term value)
+        public EQ(List<ColumnDefinition> columnDefs, Term value)
         {
-            super(ctype, columnDefs);
+            super(columnDefs);
             this.value = value;
         }
 
@@ -144,31 +141,22 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
         }
 
         @Override
+        public Iterable<Function> getFunctions()
+        {
+            return value.getFunctions();
+        }
+
+        @Override
         public String toString()
         {
             return String.format("EQ(%s)", value);
         }
 
         @Override
-        public PrimaryKeyRestrictions doMergeWith(PrimaryKeyRestrictions otherRestriction) throws InvalidRequestException
+        public Restriction doMergeWith(Restriction otherRestriction) throws InvalidRequestException
         {
             throw invalidRequest("%s cannot be restricted by more than one relation if it includes an Equal",
                                  getColumnsInCommons(otherRestriction));
-        }
-
-        @Override
-        public List<Composite> valuesAsComposites(QueryOptions options) throws InvalidRequestException
-        {
-            return Collections.singletonList(compositeValue(options));
-        }
-
-        @Override
-        public List<Composite> boundsAsComposites(Bound bound, QueryOptions options) throws InvalidRequestException
-        {
-            Composite prefix = compositeValue(options);
-            return Collections.singletonList(ctype.size() > prefix.size() && bound.isEnd()
-                                             ? prefix.end()
-                                             : prefix);
         }
 
         @Override
@@ -177,29 +165,28 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
             return index.supportsOperator(Operator.EQ);
         }
 
-        private Composite compositeValue(QueryOptions options) throws InvalidRequestException
+        @Override
+        public CompositesBuilder appendTo(CompositesBuilder builder, QueryOptions options)
         {
-            CBuilder builder = ctype.builder();
             Tuples.Value t = ((Tuples.Value) value.bind(options));
             List<ByteBuffer> values = t.getElements();
-            for (int i = 0; i < values.size(); i++)
+            for (int i = 0, m = values.size(); i < m; i++)
             {
-                ByteBuffer component = checkNotNull(values.get(i),
-                                                    "Invalid null value in condition for column %s",
-                                                    columnDefs.get(i).name);
-                builder.add(component);
+                builder.addElementToAll(values.get(i));
+                checkFalse(builder.containsNull(), "Invalid null value for column %s", columnDefs.get(i).name);
             }
-
-            return builder.build();
+            return builder;
         }
 
         @Override
         public final void addIndexExpressionTo(List<IndexExpression> expressions,
+                                               SecondaryIndexManager indexManager,
                                                QueryOptions options) throws InvalidRequestException
         {
             Tuples.Value t = ((Tuples.Value) value.bind(options));
             List<ByteBuffer> values = t.getElements();
-            for (int i = 0; i < values.size(); i++)
+
+            for (int i = 0, m = columnDefs.size(); i < m; i++)
             {
                 ColumnDefinition columnDef = columnDefs.get(i);
                 ByteBuffer component = validateIndexedValue(columnDef, values.get(i));
@@ -210,63 +197,23 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
 
     public abstract static class IN extends MultiColumnRestriction
     {
+        /**
+         * {@inheritDoc}
+         */
         @Override
-        public List<Composite> valuesAsComposites(QueryOptions options) throws InvalidRequestException
-        {
-            CBuilder builder = ctype.builder();
-            List<List<ByteBuffer>> splitInValues = splitValues(options);
-            // The IN query might not have listed the values in comparator order, so we need to re-sort
-            // the bounds lists to make sure the slices works correctly (also, to avoid duplicates).
-            TreeSet<Composite> inValues = new TreeSet<>(ctype);
-            for (List<ByteBuffer> components : splitInValues)
-            {
-                for (int i = 0; i < components.size(); i++)
-                    checkNotNull(components.get(i), "Invalid null value in condition for column " + columnDefs.get(i).name);
-
-                inValues.add(builder.buildWith(components));
-            }
-            return new ArrayList<>(inValues);
-        }
-
-        @Override
-        public List<Composite> boundsAsComposites(Bound bound, QueryOptions options) throws InvalidRequestException
-        {
-            CBuilder builder = ctype.builder();
-            List<List<ByteBuffer>> splitInValues = splitValues(options);
-            // The IN query might not have listed the values in comparator order, so we need to re-sort
-            // the bounds lists to make sure the slices works correctly (also, to avoid duplicates).
-            TreeSet<Composite> inValues = new TreeSet<>(ctype);
-            for (List<ByteBuffer> components : splitInValues)
-            {
-                for (int i = 0; i < components.size(); i++)
-                    checkNotNull(components.get(i), "Invalid null value in condition for column %s", columnDefs.get(i).name);
-
-                Composite prefix = builder.buildWith(components);
-                inValues.add(bound.isEnd() && builder.remainingCount() - components.size() > 0
-                             ? prefix.end()
-                             : prefix);
-            }
-            return new ArrayList<>(inValues);
-        }
-
-        @Override
-        public void addIndexExpressionTo(List<IndexExpression> expressions,
-                                         QueryOptions options) throws InvalidRequestException
+        public CompositesBuilder appendTo(CompositesBuilder builder, QueryOptions options)
         {
             List<List<ByteBuffer>> splitInValues = splitValues(options);
-            checkTrue(splitInValues.size() == 1, "IN restrictions are not supported on indexed columns");
+            builder.addAllElementsToAll(splitInValues);
 
-            List<ByteBuffer> values = splitInValues.get(0);
-            checkTrue(values.size() == 1, "IN restrictions are not supported on indexed columns");
-
-            ColumnDefinition columnDef = columnDefs.get(0);
-            ByteBuffer component = validateIndexedValue(columnDef, values.get(0));
-            expressions.add(new IndexExpression(columnDef.name.bytes, Operator.EQ, component));
+            if (builder.containsNull())
+                throw invalidRequest("Invalid null value in condition for columns: %s", ColumnDefinition.toIdentifiers(columnDefs));
+            return builder;
         }
 
-        public IN(CType ctype, List<ColumnDefinition> columnDefs)
+        public IN(List<ColumnDefinition> columnDefs)
         {
-            super(ctype, columnDefs);
+            super(columnDefs);
         }
 
         @Override
@@ -276,16 +223,33 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
         }
 
         @Override
-        public PrimaryKeyRestrictions doMergeWith(PrimaryKeyRestrictions otherRestrictions) throws InvalidRequestException
+        public Restriction doMergeWith(Restriction otherRestriction) throws InvalidRequestException
         {
             throw invalidRequest("%s cannot be restricted by more than one relation if it includes a IN",
-                                 getColumnsInCommons(otherRestrictions));
+                                 getColumnsInCommons(otherRestriction));
         }
 
         @Override
         protected boolean isSupportedBy(SecondaryIndex index)
         {
             return index.supportsOperator(Operator.IN);
+        }
+
+        @Override
+        public final void addIndexExpressionTo(List<IndexExpression> expressions,
+                                               SecondaryIndexManager indexManager,
+                                               QueryOptions options) throws InvalidRequestException
+        {
+            List<List<ByteBuffer>> splitInValues = splitValues(options);
+            checkTrue(splitInValues.size() == 1, "IN restrictions are not supported on indexed columns");
+            List<ByteBuffer> values = splitInValues.get(0);
+
+            for (int i = 0, m = columnDefs.size(); i < m; i++)
+            {
+                ColumnDefinition columnDef = columnDefs.get(i);
+                ByteBuffer component = validateIndexedValue(columnDef, values.get(i));
+                expressions.add(new IndexExpression(columnDef.name.bytes, Operator.EQ, component));
+            }
         }
 
         protected abstract List<List<ByteBuffer>> splitValues(QueryOptions options) throws InvalidRequestException;
@@ -299,9 +263,9 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
     {
         protected final List<Term> values;
 
-        public InWithValues(CType ctype, List<ColumnDefinition> columnDefs, List<Term> values)
+        public InWithValues(List<ColumnDefinition> columnDefs, List<Term> values)
         {
-            super(ctype, columnDefs);
+            super(columnDefs);
             this.values = values;
         }
 
@@ -309,6 +273,12 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
         public boolean usesFunction(String ksName, String functionName)
         {
             return usesFunction(values, ksName, functionName);
+        }
+
+        @Override
+        public Iterable<Function> getFunctions()
+        {
+            return Terms.getFunctions(values);
         }
 
         @Override
@@ -338,9 +308,9 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
     {
         protected final AbstractMarker marker;
 
-        public InWithMarker(CType ctype, List<ColumnDefinition> columnDefs, AbstractMarker marker)
+        public InWithMarker(List<ColumnDefinition> columnDefs, AbstractMarker marker)
         {
-            super(ctype, columnDefs);
+            super(columnDefs);
             this.marker = marker;
         }
 
@@ -348,6 +318,12 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
         public boolean usesFunction(String ksName, String functionName)
         {
             return false;
+        }
+
+        @Override
+        public Iterable<Function> getFunctions()
+        {
+            return Collections.emptySet();
         }
 
         @Override
@@ -370,14 +346,14 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
     {
         private final TermSlice slice;
 
-        public Slice(CType ctype, List<ColumnDefinition> columnDefs, Bound bound, boolean inclusive, Term term)
+        public Slice(List<ColumnDefinition> columnDefs, Bound bound, boolean inclusive, Term term)
         {
-            this(ctype, columnDefs, TermSlice.newInstance(bound, inclusive, term));
+            this(columnDefs, TermSlice.newInstance(bound, inclusive, term));
         }
 
-        private Slice(CType ctype, List<ColumnDefinition> columnDefs, TermSlice slice)
+        private Slice(List<ColumnDefinition> columnDefs, TermSlice slice)
         {
-            super(ctype, columnDefs);
+            super(columnDefs);
             this.slice = slice;
         }
 
@@ -388,74 +364,28 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
         }
 
         @Override
-        public List<Composite> valuesAsComposites(QueryOptions options) throws InvalidRequestException
+        public CompositesBuilder appendTo(CompositesBuilder builder, QueryOptions options)
         {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public List<ByteBuffer> bounds(Bound b, QueryOptions options) throws InvalidRequestException
+        public CompositesBuilder appendBoundTo(CompositesBuilder builder, Bound bound, QueryOptions options)
         {
-            return Composites.toByteBuffers(boundsAsComposites(b, options));
-        }
+            List<ByteBuffer> vals = componentBounds(bound, options);
 
-        @Override
-        public List<Composite> boundsAsComposites(Bound bound, QueryOptions options) throws InvalidRequestException
-        {
-            CBuilder builder = ctype.builder();
-            Iterator<ColumnDefinition> iter = columnDefs.iterator();
-            ColumnDefinition firstName = iter.next();
-            // A hack to preserve pre-6875 behavior for tuple-notation slices where the comparator mixes ASCENDING
-            // and DESCENDING orders.  This stores the bound for the first component; we will re-use it for all following
-            // components, even if they don't match the first component's reversal/non-reversal.  Note that this does *not*
-            // guarantee correct query results, it just preserves the previous behavior.
-            Bound firstComponentBound = !firstName.isReversedType() ? bound : bound.reverse();
-
-            if (!hasBound(firstComponentBound))
+            for (int i = 0, m = vals.size(); i < m; i++)
             {
-                Composite prefix = builder.build();
-                return Collections.singletonList(builder.remainingCount() > 0 && bound.isEnd()
-                        ? prefix.end()
-                        : prefix);
+                ByteBuffer v = checkNotNull(vals.get(i), "Invalid null value in condition for column %s", columnDefs.get(i).name);
+                builder.addElementToAll(v);
             }
-
-            List<ByteBuffer> vals = componentBounds(firstComponentBound, options);
-
-            ByteBuffer v = checkNotNull(vals.get(firstName.position()), "Invalid null value in condition for column %s", firstName.name);
-            builder.add(v);
-
-            while (iter.hasNext())
-            {
-                ColumnDefinition def = iter.next();
-                if (def.position() >= vals.size())
-                    break;
-
-                v = checkNotNull(vals.get(def.position()), "Invalid null value in condition for column %s", def.name);
-                builder.add(v);
-            }
-            Composite.EOC eoc =  eocFor(this, bound, firstComponentBound);
-            return Collections.singletonList(builder.build().withEOC(eoc));
-        }
-
-        @Override
-        public void addIndexExpressionTo(List<IndexExpression> expressions,
-                                         QueryOptions options) throws InvalidRequestException
-        {
-            throw invalidRequest("Slice restrictions are not supported on indexed columns which are part of a multi column relation");
+            return builder;
         }
 
         @Override
         protected boolean isSupportedBy(SecondaryIndex index)
         {
             return slice.isSupportedBy(index);
-        }
-
-        private static Composite.EOC eocFor(Restriction r, Bound eocBound, Bound inclusiveBound)
-        {
-            if (eocBound.isStart())
-                return r.isInclusive(inclusiveBound) ? Composite.EOC.NONE : Composite.EOC.END;
-
-            return r.isInclusive(inclusiveBound) ? Composite.EOC.END : Composite.EOC.START;
         }
 
         @Override
@@ -472,19 +402,34 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
         }
 
         @Override
+        public Iterable<Function> getFunctions()
+        {
+            return slice.getFunctions();
+        }
+
+        @Override
         public boolean isInclusive(Bound b)
         {
             return slice.isInclusive(b);
         }
 
         @Override
-        public PrimaryKeyRestrictions doMergeWith(PrimaryKeyRestrictions otherRestriction) throws InvalidRequestException
+        public Restriction doMergeWith(Restriction otherRestriction) throws InvalidRequestException
         {
             checkTrue(otherRestriction.isSlice(),
                       "Column \"%s\" cannot be restricted by both an equality and an inequality relation",
                       getColumnsInCommons(otherRestriction));
 
             Slice otherSlice = (Slice) otherRestriction;
+
+            if (!getFirstColumn().equals(otherRestriction.getFirstColumn()))
+            {
+                ColumnDefinition column = getFirstColumn().position() > otherRestriction.getFirstColumn().position()
+                        ? getFirstColumn() : otherRestriction.getFirstColumn();
+
+                throw invalidRequest("Column \"%s\" cannot be restricted by two tuple-notation inequalities not starting with the same column",
+                                     column.name);
+            }
 
             checkFalse(hasBound(Bound.START) && otherSlice.hasBound(Bound.START),
                        "More than one restriction was found for the start bound on %s",
@@ -493,8 +438,16 @@ public abstract class MultiColumnRestriction extends AbstractPrimaryKeyRestricti
                        "More than one restriction was found for the end bound on %s",
                        getColumnsInCommons(otherRestriction));
 
-            List<ColumnDefinition> newColumnDefs = size() >= otherSlice.size() ?  columnDefs : otherSlice.columnDefs;
-            return new Slice(ctype,  newColumnDefs, slice.merge(otherSlice.slice));
+            List<ColumnDefinition> newColumnDefs = columnDefs.size() >= otherSlice.columnDefs.size() ?  columnDefs : otherSlice.columnDefs;
+            return new Slice(newColumnDefs, slice.merge(otherSlice.slice));
+        }
+
+        @Override
+        public final void addIndexExpressionTo(List<IndexExpression> expressions,
+                                               SecondaryIndexManager indexManager,
+                                               QueryOptions options) throws InvalidRequestException
+        {
+            throw invalidRequest("Slice restrictions are not supported on indexed columns");
         }
 
         @Override

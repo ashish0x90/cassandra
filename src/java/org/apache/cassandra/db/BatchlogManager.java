@@ -31,7 +31,7 @@ import javax.management.ObjectName;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.*;
 import com.google.common.util.concurrent.RateLimiter;
-import org.apache.cassandra.io.sstable.format.SSTableReader;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,9 +41,11 @@ import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.dht.Token;
+import org.apache.cassandra.exceptions.WriteFailureException;
 import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.gms.FailureDetector;
 import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessageOut;
@@ -54,7 +56,6 @@ import org.apache.cassandra.service.WriteResponseHandler;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.WrappedRunnable;
-
 import static org.apache.cassandra.cql3.QueryProcessor.executeInternal;
 
 public class BatchlogManager implements BatchlogManagerMBean
@@ -102,7 +103,7 @@ public class BatchlogManager implements BatchlogManagerMBean
 
     public int countAllBatches()
     {
-        String query = String.format("SELECT count(*) FROM %s.%s", SystemKeyspace.NAME, SystemKeyspace.BATCHLOG_TABLE);
+        String query = String.format("SELECT count(*) FROM %s.%s", SystemKeyspace.NAME, SystemKeyspace.BATCHLOG);
         return (int) executeInternal(query).one().getLong("count");
     }
 
@@ -137,8 +138,8 @@ public class BatchlogManager implements BatchlogManagerMBean
     @VisibleForTesting
     static Mutation getBatchlogMutationFor(Collection<Mutation> mutations, UUID uuid, int version, long now)
     {
-        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(SystemKeyspace.BatchlogTable);
-        CFRowAdder adder = new CFRowAdder(cf, SystemKeyspace.BatchlogTable.comparator.builder().build(), now);
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(SystemKeyspace.Batchlog);
+        CFRowAdder adder = new CFRowAdder(cf, SystemKeyspace.Batchlog.comparator.builder().build(), now);
         adder.add("data", serializeMutations(mutations, version))
              .add("written_at", new Date(now / 1000))
              .add("version", version);
@@ -160,7 +161,7 @@ public class BatchlogManager implements BatchlogManagerMBean
             throw new AssertionError(); // cannot happen.
         }
 
-        return buf.asByteBuffer();
+        return buf.buffer();
     }
 
     private void replayAllFailedBatches() throws ExecutionException, InterruptedException
@@ -174,7 +175,7 @@ public class BatchlogManager implements BatchlogManagerMBean
 
         UntypedResultSet page = executeInternal(String.format("SELECT id, data, written_at, version FROM %s.%s LIMIT %d",
                                                               SystemKeyspace.NAME,
-                                                              SystemKeyspace.BATCHLOG_TABLE,
+                                                              SystemKeyspace.BATCHLOG,
                                                               PAGE_SIZE));
 
         while (!page.isEmpty())
@@ -186,7 +187,7 @@ public class BatchlogManager implements BatchlogManagerMBean
 
             page = executeInternal(String.format("SELECT id, data, written_at, version FROM %s.%s WHERE token(id) > token(?) LIMIT %d",
                                                  SystemKeyspace.NAME,
-                                                 SystemKeyspace.BATCHLOG_TABLE,
+                                                 SystemKeyspace.BATCHLOG,
                                                  PAGE_SIZE),
                                    id);
         }
@@ -199,7 +200,7 @@ public class BatchlogManager implements BatchlogManagerMBean
     private void deleteBatch(UUID id)
     {
         Mutation mutation = new Mutation(SystemKeyspace.NAME, UUIDType.instance.decompose(id));
-        mutation.delete(SystemKeyspace.BATCHLOG_TABLE, FBUtilities.timestampMicros());
+        mutation.delete(SystemKeyspace.BATCHLOG, FBUtilities.timestampMicros());
         mutation.apply();
     }
 
@@ -264,7 +265,7 @@ public class BatchlogManager implements BatchlogManagerMBean
         private final ByteBuffer data;
         private final int version;
 
-        private List<ReplayWriteResponseHandler> replayHandlers;
+        private List<ReplayWriteResponseHandler<Mutation>> replayHandlers;
 
         public Batch(UUID id, long writtenAt, ByteBuffer data, int version)
         {
@@ -298,14 +299,15 @@ public class BatchlogManager implements BatchlogManagerMBean
         {
             for (int i = 0; i < replayHandlers.size(); i++)
             {
-                ReplayWriteResponseHandler handler = replayHandlers.get(i);
+                ReplayWriteResponseHandler<Mutation> handler = replayHandlers.get(i);
                 try
                 {
                     handler.get();
                 }
-                catch (WriteTimeoutException e)
+                catch (WriteTimeoutException|WriteFailureException e)
                 {
-                    logger.debug("Timed out replaying a batched mutation to a node, will write a hint");
+                    logger.debug("Failed replaying a batched mutation to a node, will write a hint");
+                    logger.debug("Failure was : {}", e.getMessage());
                     // writing hints for the rest to hints, starting from i
                     writeHintsForUndeliveredEndpoints(i);
                     return;
@@ -348,7 +350,7 @@ public class BatchlogManager implements BatchlogManagerMBean
                 {
                     Mutation undeliveredMutation = replayingMutations.get(i);
                     int ttl = calculateHintTTL(replayingMutations);
-                    ReplayWriteResponseHandler handler = replayHandlers.get(i);
+                    ReplayWriteResponseHandler<Mutation> handler = replayHandlers.get(i);
 
                     if (ttl > 0 && handler != null)
                         for (InetAddress endpoint : handler.undelivered)
@@ -361,12 +363,12 @@ public class BatchlogManager implements BatchlogManagerMBean
             }
         }
 
-        private List<ReplayWriteResponseHandler> sendReplays(List<Mutation> mutations, long writtenAt, int ttl)
+        private List<ReplayWriteResponseHandler<Mutation>> sendReplays(List<Mutation> mutations, long writtenAt, int ttl)
         {
-            List<ReplayWriteResponseHandler> handlers = new ArrayList<>(mutations.size());
+            List<ReplayWriteResponseHandler<Mutation>> handlers = new ArrayList<>(mutations.size());
             for (Mutation mutation : mutations)
             {
-                ReplayWriteResponseHandler handler = sendSingleReplayMutation(mutation, writtenAt, ttl);
+                ReplayWriteResponseHandler<Mutation> handler = sendSingleReplayMutation(mutation, writtenAt, ttl);
                 if (handler != null)
                     handlers.add(handler);
             }
@@ -379,7 +381,7 @@ public class BatchlogManager implements BatchlogManagerMBean
          *
          * @return direct delivery handler to wait on or null, if no live nodes found
          */
-        private ReplayWriteResponseHandler sendSingleReplayMutation(final Mutation mutation, long writtenAt, int ttl)
+        private ReplayWriteResponseHandler<Mutation> sendSingleReplayMutation(final Mutation mutation, long writtenAt, int ttl)
         {
             Set<InetAddress> liveEndpoints = new HashSet<>();
             String ks = mutation.getKeyspaceName();
@@ -399,7 +401,7 @@ public class BatchlogManager implements BatchlogManagerMBean
             if (liveEndpoints.isEmpty())
                 return null;
 
-            ReplayWriteResponseHandler handler = new ReplayWriteResponseHandler(liveEndpoints);
+            ReplayWriteResponseHandler<Mutation> handler = new ReplayWriteResponseHandler<>(liveEndpoints);
             MessageOut<Mutation> message = mutation.createMessage();
             for (InetAddress endpoint : liveEndpoints)
                 MessagingService.instance().sendRR(message, endpoint, handler, false);
@@ -418,7 +420,11 @@ public class BatchlogManager implements BatchlogManagerMBean
             return unadjustedTTL - (int) TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis() - writtenAt);
         }
 
-        private static class ReplayWriteResponseHandler extends WriteResponseHandler
+        /**
+         * A wrapper of WriteResponseHandler that stores the addresses of the endpoints from
+         * which we did not receive a successful reply.
+         */
+        private static class ReplayWriteResponseHandler<T> extends WriteResponseHandler<T>
         {
             private final Set<InetAddress> undelivered = Collections.newSetFromMap(new ConcurrentHashMap<InetAddress, Boolean>());
 
@@ -435,9 +441,9 @@ public class BatchlogManager implements BatchlogManagerMBean
             }
 
             @Override
-            public void response(MessageIn m)
+            public void response(MessageIn<T> m)
             {
-                boolean removed = undelivered.remove(m.from);
+                boolean removed = undelivered.remove(m == null ? FBUtilities.getBroadcastAddress() : m.from);
                 assert removed;
                 super.response(m);
             }
@@ -447,7 +453,7 @@ public class BatchlogManager implements BatchlogManagerMBean
     // force flush + compaction to reclaim space from the replayed batches
     private void cleanup() throws ExecutionException, InterruptedException
     {
-        ColumnFamilyStore cfs = Keyspace.open(SystemKeyspace.NAME).getColumnFamilyStore(SystemKeyspace.BATCHLOG_TABLE);
+        ColumnFamilyStore cfs = Keyspace.open(SystemKeyspace.NAME).getColumnFamilyStore(SystemKeyspace.BATCHLOG);
         cfs.forceBlockingFlush();
         Collection<Descriptor> descriptors = new ArrayList<>();
         for (SSTableReader sstr : cfs.getSSTables())

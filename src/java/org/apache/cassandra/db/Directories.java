@@ -48,7 +48,6 @@ import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.sstable.*;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
@@ -194,10 +193,12 @@ public class Directories
 
         this.dataPaths = new File[dataDirectories.length];
         // If upgraded from version less than 2.1, use existing directories
+        String oldSSTableRelativePath = join(metadata.ksName,
+                                         idx > 0 ? metadata.cfName.substring(0, idx) : metadata.cfName);
         for (int i = 0; i < dataDirectories.length; ++i)
         {
             // check if old SSTable directory exists
-            dataPaths[i] = new File(dataDirectories[i].location, join(metadata.ksName, metadata.cfName));
+            dataPaths[i] = new File(dataDirectories[i].location, oldSSTableRelativePath);
         }
         boolean olderDirectoryExists = Iterables.any(Arrays.asList(dataPaths), new Predicate<File>()
         {
@@ -209,8 +210,10 @@ public class Directories
         if (!olderDirectoryExists)
         {
             // use 2.1-style path names
+        	
+        	String newSSTableRelativePath = join(metadata.ksName, directoryName);
             for (int i = 0; i < dataDirectories.length; ++i)
-                dataPaths[i] = new File(dataDirectories[i].location, join(metadata.ksName, directoryName));
+                dataPaths[i] = new File(dataDirectories[i].location, newSSTableRelativePath);
         }
 
         for (File dir : dataPaths)
@@ -291,11 +294,15 @@ public class Directories
         for (DataDirectory dataDir : dataDirectories)
         {
             if (BlacklistedDirectories.isUnwritable(getLocationForDisk(dataDir)))
+            {
+                logger.debug("removing blacklisted candidate {}", dataDir.location);
                 continue;
+            }
             DataDirectoryCandidate candidate = new DataDirectoryCandidate(dataDir);
             // exclude directory if its total writeSize does not fit to data directory
             if (candidate.availableSpace < writeSize)
             {
+                logger.debug("removing candidate {}, usable={}, requested={}", candidate.dataDirectory.location, candidate.availableSpace, writeSize);
                 tooBig = true;
                 continue;
             }
@@ -343,6 +350,24 @@ public class Directories
 
         // sort directories by perc
         Collections.sort(candidates);
+    }
+
+    public boolean hasAvailableDiskSpace(long estimatedSSTables, long expectedTotalWriteSize)
+    {
+        long writeSize = expectedTotalWriteSize / estimatedSSTables;
+        long totalAvailable = 0L;
+
+        for (DataDirectory dataDir : dataDirectories)
+        {
+            if (BlacklistedDirectories.isUnwritable(getLocationForDisk(dataDir)))
+                  continue;
+            DataDirectoryCandidate candidate = new DataDirectoryCandidate(dataDir);
+            // exclude directory if its total writeSize does not fit to data directory
+            if (candidate.availableSpace < writeSize)
+                continue;
+            totalAvailable += candidate.availableSpace;
+        }
+        return totalAvailable > expectedTotalWriteSize;
     }
 
     public static File getSnapshotDirectory(Descriptor desc, String snapshotName)

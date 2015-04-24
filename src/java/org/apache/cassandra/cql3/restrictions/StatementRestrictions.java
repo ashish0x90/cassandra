@@ -21,18 +21,14 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.cql3.ColumnIdentifier;
-import org.apache.cassandra.cql3.QueryOptions;
-import org.apache.cassandra.cql3.Relation;
-import org.apache.cassandra.cql3.VariableSpecifications;
+import org.apache.cassandra.cql3.*;
+import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.cql3.statements.Bound;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.IndexExpression;
-import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.RowPosition;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.dht.*;
@@ -68,7 +64,7 @@ public final class StatementRestrictions
     /**
      * Restriction on non-primary key columns (i.e. secondary index restrictions)
      */
-    private SingleColumnRestrictions nonPrimaryKeyRestrictions;
+    private RestrictionSet nonPrimaryKeyRestrictions;
 
     /**
      * The restrictions used to build the index expressions
@@ -99,9 +95,9 @@ public final class StatementRestrictions
     private StatementRestrictions(CFMetaData cfm)
     {
         this.cfm = cfm;
-        this.partitionKeyRestrictions = new SingleColumnPrimaryKeyRestrictions(cfm.getKeyValidatorAsCType());
-        this.clusteringColumnsRestrictions = new SingleColumnPrimaryKeyRestrictions(cfm.comparator);
-        this.nonPrimaryKeyRestrictions = new SingleColumnRestrictions();
+        this.partitionKeyRestrictions = new PrimaryKeyRestrictionSet(cfm.getKeyValidatorAsCType());
+        this.clusteringColumnsRestrictions = new PrimaryKeyRestrictionSet(cfm.comparator);
+        this.nonPrimaryKeyRestrictions = new RestrictionSet();
     }
 
     public StatementRestrictions(CFMetaData cfm,
@@ -111,9 +107,9 @@ public final class StatementRestrictions
             boolean selectACollection) throws InvalidRequestException
     {
         this.cfm = cfm;
-        this.partitionKeyRestrictions = new SingleColumnPrimaryKeyRestrictions(cfm.getKeyValidatorAsCType());
-        this.clusteringColumnsRestrictions = new SingleColumnPrimaryKeyRestrictions(cfm.comparator);
-        this.nonPrimaryKeyRestrictions = new SingleColumnRestrictions();
+        this.partitionKeyRestrictions = new PrimaryKeyRestrictionSet(cfm.getKeyValidatorAsCType());
+        this.clusteringColumnsRestrictions = new PrimaryKeyRestrictionSet(cfm.comparator);
+        this.nonPrimaryKeyRestrictions = new RestrictionSet();
 
         /*
          * WHERE clause. For a given entity, rules are: - EQ relation conflicts with anything else (including a 2nd EQ)
@@ -150,35 +146,11 @@ public final class StatementRestrictions
         if (isKeyRange && hasQueriableClusteringColumnIndex)
             usesSecondaryIndexing = true;
 
+        usesSecondaryIndexing = usesSecondaryIndexing || clusteringColumnsRestrictions.isContains();
+
         if (usesSecondaryIndexing)
-        {
             indexRestrictions.add(clusteringColumnsRestrictions);
-        }
-        else if (clusteringColumnsRestrictions.isContains())
-        {
-            indexRestrictions.add(new ForwardingPrimaryKeyRestrictions() {
 
-                @Override
-                protected PrimaryKeyRestrictions getDelegate()
-                {
-                    return clusteringColumnsRestrictions;
-                }
-
-                @Override
-                public void addIndexExpressionTo(List<IndexExpression> expressions, QueryOptions options) throws InvalidRequestException
-                {
-                    List<IndexExpression> list = new ArrayList<>();
-                    super.addIndexExpressionTo(list, options);
-
-                    for (IndexExpression expression : list)
-                    {
-                        if (expression.isContains() || expression.isContainsKey())
-                            expressions.add(expression);
-                    }
-                }
-            });
-            usesSecondaryIndexing = true;
-        }
         // Even if usesSecondaryIndexing is false at this point, we'll still have to use one if
         // there is restrictions not covered by the PK.
         if (!nonPrimaryKeyRestrictions.isEmpty())
@@ -208,9 +180,16 @@ public final class StatementRestrictions
                 || nonPrimaryKeyRestrictions.usesFunction(ksName, functionName);
     }
 
+    public Iterable<Function> getFunctions()
+    {
+        return Iterables.concat(partitionKeyRestrictions.getFunctions(),
+                                clusteringColumnsRestrictions.getFunctions(),
+                                nonPrimaryKeyRestrictions.getFunctions());
+    }
+
     private void addSingleColumnRestriction(SingleColumnRestriction restriction) throws InvalidRequestException
     {
-        ColumnDefinition def = restriction.getColumnDef();
+        ColumnDefinition def = restriction.columnDef;
         if (def.isPartitionKey())
             partitionKeyRestrictions = partitionKeyRestrictions.mergeWith(restriction);
         else if (def.isClusteringColumn())
@@ -259,10 +238,9 @@ public final class StatementRestrictions
         // If a component of the partition key is restricted by a relation, all preceding
         // components must have a EQ. Only the last partition key component can be in IN relation.
         if (partitionKeyRestrictions.isOnToken())
-        {
             isKeyRange = true;
-        }
-        else if (hasPartitionKeyUnrestrictedComponents())
+
+        if (hasPartitionKeyUnrestrictedComponents())
         {
             if (!partitionKeyRestrictions.isEmpty())
             {
@@ -338,14 +316,15 @@ public final class StatementRestrictions
             usesSecondaryIndexing = true;
     }
 
-    public List<IndexExpression> getIndexExpressions(QueryOptions options) throws InvalidRequestException
+    public List<IndexExpression> getIndexExpressions(SecondaryIndexManager indexManager,
+                                                     QueryOptions options) throws InvalidRequestException
     {
         if (!usesSecondaryIndexing || indexRestrictions.isEmpty())
             return Collections.emptyList();
 
         List<IndexExpression> expressions = new ArrayList<>();
         for (Restrictions restrictions : indexRestrictions)
-            restrictions.addIndexExpressionTo(expressions, options);
+            restrictions.addIndexExpressionTo(expressions, indexManager, options);
 
         return expressions;
     }

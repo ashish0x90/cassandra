@@ -22,28 +22,20 @@ import java.util.Collection;
 import java.util.List;
 
 import com.google.common.collect.ArrayListMultimap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.service.IMigrationListener;
+import org.apache.cassandra.service.MigrationListener;
 import org.apache.cassandra.service.MigrationManager;
 
 public abstract class Functions
 {
-    private static final Logger logger = LoggerFactory.getLogger(Functions.class);
-
     // We special case the token function because that's the only function whose argument types actually
     // depend on the table on which the function is called. Because it's the sole exception, it's easier
     // to handle it as a special case.
     private static final FunctionName TOKEN_FUNCTION_NAME = FunctionName.nativeFunction("token");
-
-    private static final String SELECT_UD_FUNCTION = "SELECT * FROM " + SystemKeyspace.NAME + '.' + SystemKeyspace.SCHEMA_FUNCTIONS_TABLE;
-    private static final String SELECT_UD_AGGREGATE = "SELECT * FROM " + SystemKeyspace.NAME + '.' + SystemKeyspace.SCHEMA_AGGREGATES_TABLE;
 
     private Functions() {}
 
@@ -61,7 +53,7 @@ public abstract class Functions
 
         for (CQL3Type type : CQL3Type.Native.values())
         {
-            // Note: because text and varchar ends up being synonimous, our automatic makeToBlobFunction doesn't work
+            // Note: because text and varchar ends up being synonymous, our automatic makeToBlobFunction doesn't work
             // for varchar, so we special case it below. We also skip blob for obvious reasons.
             if (type == CQL3Type.Native.VARCHAR || type == CQL3Type.Native.BLOB)
                 continue;
@@ -96,18 +88,6 @@ public abstract class Functions
         declared.put(fun.name(), fun);
     }
 
-    /**
-     * Loading existing UDFs from the schema.
-     */
-    public static void loadUDFFromSchema()
-    {
-        logger.debug("Loading UDFs");
-        for (UntypedResultSet.Row row : QueryProcessor.executeOnceInternal(SELECT_UD_FUNCTION))
-            addFunction(UDFunction.fromSchema(row));
-        for (UntypedResultSet.Row row : QueryProcessor.executeOnceInternal(SELECT_UD_AGGREGATE))
-            addFunction(UDAggregate.fromSchema(row));
-    }
-
     public static ColumnSpecification makeArgSpec(String receiverKs, String receiverCf, Function fun, int i)
     {
         return new ColumnSpecification(receiverKs,
@@ -121,17 +101,40 @@ public abstract class Functions
         return declared.get(name).size();
     }
 
+    /**
+     * @param keyspace the current keyspace
+     * @param name the name of the function
+     * @param providedArgs the arguments provided for the function call
+     * @param receiverKs the receiver's keyspace
+     * @param receiverCf the receiver's table
+     * @param receiverType if the receiver type is known (during inserts, for example), this should be the type of
+     *                     the receiver
+     * @throws InvalidRequestException
+     */
     public static Function get(String keyspace,
                                FunctionName name,
                                List<? extends AssignmentTestable> providedArgs,
                                String receiverKs,
-                               String receiverCf)
+                               String receiverCf,
+                               AbstractType<?> receiverType)
     throws InvalidRequestException
     {
-        if (name.hasKeyspace()
-            ? name.equals(TOKEN_FUNCTION_NAME)
-            : name.name.equals(TOKEN_FUNCTION_NAME.name))
+        if (name.equalsNativeFunction(TOKEN_FUNCTION_NAME))
             return new TokenFct(Schema.instance.getCFMetaData(receiverKs, receiverCf));
+
+        // The toJson() function can accept any type of argument, so instances of it are not pre-declared.  Instead,
+        // we create new instances as needed while handling selectors (which is the only place that toJson() is supported,
+        // due to needing to know the argument types in advance).
+        if (name.equalsNativeFunction(ToJsonFct.NAME))
+            throw new InvalidRequestException("toJson() may only be used within the selection clause of SELECT statements");
+
+        // Similarly, we can only use fromJson when we know the receiver type (such as inserts)
+        if (name.equalsNativeFunction(FromJsonFct.NAME))
+        {
+            if (receiverType == null)
+                throw new InvalidRequestException("fromJson() cannot be used in the selection clause of a SELECT statement");
+            return FromJsonFct.getInstance(receiverType);
+        }
 
         List<Function> candidates;
         if (!name.hasKeyspace())
@@ -270,7 +273,7 @@ public abstract class Functions
         return sb.toString();
     }
 
-    // This is *not* thread safe but is only called in DefsTables that is synchronized.
+    // This is *not* thread safe but is only called in SchemaTables that is synchronized.
     public static void addFunction(AbstractFunction fun)
     {
         // We shouldn't get there unless that function don't exist
@@ -322,28 +325,12 @@ public abstract class Functions
         return true;
     }
 
-    private static class FunctionsMigrationListener implements IMigrationListener
+    private static class FunctionsMigrationListener extends MigrationListener
     {
-        public void onCreateKeyspace(String ksName) { }
-        public void onCreateColumnFamily(String ksName, String cfName) { }
-        public void onCreateUserType(String ksName, String typeName) { }
-        public void onCreateFunction(String ksName, String functionName) { }
-        public void onCreateAggregate(String ksName, String aggregateName) { }
-
-        public void onUpdateKeyspace(String ksName) { }
-        public void onUpdateColumnFamily(String ksName, String cfName) { }
         public void onUpdateUserType(String ksName, String typeName) {
             for (Function function : all())
                 if (function instanceof UDFunction)
                     ((UDFunction)function).userTypeUpdated(ksName, typeName);
         }
-        public void onUpdateFunction(String ksName, String functionName) { }
-        public void onUpdateAggregate(String ksName, String aggregateName) { }
-
-        public void onDropKeyspace(String ksName) { }
-        public void onDropColumnFamily(String ksName, String cfName) { }
-        public void onDropUserType(String ksName, String typeName) { }
-        public void onDropFunction(String ksName, String functionName) { }
-        public void onDropAggregate(String ksName, String aggregateName) { }
     }
 }

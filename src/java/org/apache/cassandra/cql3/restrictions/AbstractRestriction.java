@@ -24,10 +24,12 @@ import org.apache.cassandra.cql3.ColumnSpecification;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.Term;
 import org.apache.cassandra.cql3.statements.Bound;
+import org.apache.cassandra.db.composites.CompositesBuilder;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkFalse;
 import static org.apache.cassandra.cql3.statements.RequestValidations.checkNotNull;
+import static org.apache.cassandra.cql3.statements.RequestValidations.checkBindValueSet;
 
 /**
  * Base class for <code>Restriction</code>s
@@ -77,9 +79,9 @@ abstract class AbstractRestriction  implements Restriction
     }
 
     @Override
-    public List<ByteBuffer> bounds(Bound b, QueryOptions options) throws InvalidRequestException
+    public CompositesBuilder appendBoundTo(CompositesBuilder builder, Bound bound, QueryOptions options)
     {
-        return values(options);
+        return appendTo(builder, options);
     }
 
     @Override
@@ -93,6 +95,7 @@ abstract class AbstractRestriction  implements Restriction
                                                      throws InvalidRequestException
     {
         checkNotNull(value, "Unsupported null value for indexed column %s", columnSpec.name);
+        checkBindValueSet(value, "Unsupported unset value for indexed column %s", columnSpec.name);
         checkFalse(value.remaining() > 0xFFFF, "Index expression values may not be larger than 64K");
         return value;
     }

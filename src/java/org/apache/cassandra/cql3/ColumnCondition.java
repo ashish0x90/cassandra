@@ -21,11 +21,13 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
-import static com.google.common.collect.Lists.newArrayList;
 
 import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.cql3.functions.Function;
+import org.apache.cassandra.db.Cell;
+import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.composites.CellNameType;
 import org.apache.cassandra.db.composites.Composite;
@@ -34,6 +36,8 @@ import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.utils.ByteBufferUtil;
+
+import static com.google.common.collect.Lists.newArrayList;
 
 /**
  * A CQL3 condition on the value of a column or collection element.  For example, "UPDATE .. IF a = 0".
@@ -106,6 +110,20 @@ public class ColumnCondition
         return false;
     }
 
+    public Iterable<Function> getFunctions()
+    {
+        Iterable<Function> iter = Collections.emptyList();
+        if (collectionElement != null)
+           iter = Iterables.concat(iter, collectionElement.getFunctions());
+        if (value != null)
+            iter = Iterables.concat(iter, value.getFunctions());
+        if (inValues != null)
+            for (Term value : inValues)
+                if (value != null)
+                    iter = Iterables.concat(iter, value.getFunctions());
+        return iter;
+    }
+
     /**
      * Collects the column specification for the bind variables of this operation.
      *
@@ -171,6 +189,8 @@ public class ColumnCondition
         /** Returns true if the operator is satisfied (i.e. "value operator otherValue == true"), false otherwise. */
         protected boolean compareWithOperator(Operator operator, AbstractType<?> type, ByteBuffer value, ByteBuffer otherValue) throws InvalidRequestException
         {
+            if (value == ByteBufferUtil.UNSET_BYTE_BUFFER)
+                throw new InvalidRequestException("Invalid 'unset' value in condition");
             if (value == null)
             {
                 switch (operator)
@@ -260,7 +280,7 @@ public class ColumnCondition
             assert !(column.type instanceof CollectionType) && condition.collectionElement == null;
             assert condition.operator == Operator.IN;
             if (condition.inValues == null)
-                this.inValues = ((Lists.Marker) condition.value).bind(options).getElements();
+                this.inValues = ((Lists.Value) condition.value.bind(options)).getElements();
             else
             {
                 this.inValues = new ArrayList<>(condition.inValues.size());
@@ -371,7 +391,7 @@ public class ColumnCondition
             this.collectionElement = condition.collectionElement.bindAndGet(options);
 
             if (condition.inValues == null)
-                this.inValues = ((Lists.Marker) condition.value).bind(options).getElements();
+                this.inValues = ((Lists.Value) condition.value.bind(options)).getElements();
             else
             {
                 this.inValues = new ArrayList<>(condition.inValues.size());
@@ -507,11 +527,11 @@ public class ColumnCondition
             // make sure we use v3 serialization format for comparison
             ByteBuffer conditionValue;
             if (type.kind == CollectionType.Kind.LIST)
-                conditionValue = ((Lists.Value) value).getWithProtocolVersion(Server.VERSION_3);
+                conditionValue = ((Lists.Value) value).get(Server.VERSION_3);
             else if (type.kind == CollectionType.Kind.SET)
-                conditionValue = ((Sets.Value) value).getWithProtocolVersion(Server.VERSION_3);
+                conditionValue = ((Sets.Value) value).get(Server.VERSION_3);
             else
-                conditionValue = ((Maps.Value) value).getWithProtocolVersion(Server.VERSION_3);
+                conditionValue = ((Maps.Value) value).get(Server.VERSION_3);
 
             return compareWithOperator(operator, type, conditionValue, cell.value());
         }
@@ -523,9 +543,15 @@ public class ColumnCondition
 
             switch (type.kind)
             {
-                case LIST: return listAppliesTo((ListType)type, iter, ((Lists.Value)value).elements, operator);
-                case SET: return setAppliesTo((SetType)type, iter, ((Sets.Value)value).elements, operator);
-                case MAP: return mapAppliesTo((MapType)type, iter, ((Maps.Value)value).map, operator);
+                case LIST:
+                    List<ByteBuffer> valueList = ((Lists.Value) value).elements;
+                    return listAppliesTo((ListType)type, iter, valueList, operator);
+                case SET:
+                    Set<ByteBuffer> valueSet = ((Sets.Value) value).elements;
+                    return setAppliesTo((SetType)type, iter, valueSet, operator);
+                case MAP:
+                    Map<ByteBuffer, ByteBuffer> valueMap = ((Maps.Value) value).map;
+                    return mapAppliesTo((MapType)type, iter, valueMap, operator);
             }
             throw new AssertionError();
         }
@@ -632,7 +658,7 @@ public class ColumnCondition
                 if (column.type instanceof ListType)
                 {
                     ListType deserializer = ListType.getInstance(collectionType.valueComparator(), false);
-                    for (ByteBuffer buffer : inValuesMarker.bind(options).elements)
+                    for (ByteBuffer buffer : ((Lists.Value)inValuesMarker.bind(options)).elements)
                     {
                         if (buffer == null)
                             this.inValues.add(null);
@@ -643,7 +669,7 @@ public class ColumnCondition
                 else if (column.type instanceof MapType)
                 {
                     MapType deserializer = MapType.getInstance(collectionType.nameComparator(), collectionType.valueComparator(), false);
-                    for (ByteBuffer buffer : inValuesMarker.bind(options).elements)
+                    for (ByteBuffer buffer : ((Lists.Value)inValuesMarker.bind(options)).elements)
                     {
                         if (buffer == null)
                             this.inValues.add(null);
@@ -654,7 +680,7 @@ public class ColumnCondition
                 else if (column.type instanceof SetType)
                 {
                     SetType deserializer = SetType.getInstance(collectionType.valueComparator(), false);
-                    for (ByteBuffer buffer : inValuesMarker.bind(options).elements)
+                    for (ByteBuffer buffer : ((Lists.Value)inValuesMarker.bind(options)).elements)
                     {
                         if (buffer == null)
                             this.inValues.add(null);
@@ -695,7 +721,7 @@ public class ColumnCondition
                         if (cell == null || !cell.isLive(now))
                             return true;
                     }
-                    else if (type.compare(((Term.CollectionTerminal)value).getWithProtocolVersion(Server.VERSION_3), cell.value()) == 0)
+                    else if (type.compare(value.get(Server.VERSION_3), cell.value()) == 0)
                     {
                         return true;
                     }

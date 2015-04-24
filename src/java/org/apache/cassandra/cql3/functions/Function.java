@@ -20,8 +20,6 @@ package org.apache.cassandra.cql3.functions;
 import java.util.List;
 
 import org.apache.cassandra.db.marshal.AbstractType;
-
-import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.github.jamm.Unmetered;
 
 @Unmetered
@@ -53,6 +51,8 @@ public interface Function
     public boolean isAggregate();
 
     boolean usesFunction(String ksName, String functionName);
+
+    Iterable<Function> getFunctions();
 
     boolean hasReferenceTo(Function function);
 }

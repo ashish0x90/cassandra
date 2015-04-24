@@ -17,11 +17,35 @@
  */
 package org.apache.cassandra.cql3.restrictions;
 
+import java.nio.ByteBuffer;
+import java.util.List;
+
+import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.cql3.statements.Bound;
+import org.apache.cassandra.db.composites.CType;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+
 /**
  * Base class for <code>PrimaryKeyRestrictions</code>.
  */
 abstract class AbstractPrimaryKeyRestrictions extends AbstractRestriction implements PrimaryKeyRestrictions
 {
+    /**
+     * The composite type.
+     */
+    protected final CType ctype;
+
+    public AbstractPrimaryKeyRestrictions(CType ctype)
+    {
+        this.ctype = ctype;
+    }
+
+    @Override
+    public List<ByteBuffer> bounds(Bound b, QueryOptions options) throws InvalidRequestException
+    {
+        return values(options);
+    }
+
     @Override
     public final boolean isEmpty()
     {

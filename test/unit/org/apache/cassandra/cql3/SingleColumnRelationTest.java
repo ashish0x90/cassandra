@@ -125,7 +125,7 @@ public class SingleColumnRelationTest extends CQLTester
                    row("first", 2, 6, 2),
                    row("first", 3, 7, 3));
 
-        assertInvalidMessage("Invalid null value for IN restriction",
+        assertInvalidMessage("Invalid null value for column b",
                              "select * from %s where a = ? and b in ? and c in ?", "first", null, Arrays.asList(7, 6));
 
         assertRows(execute("select * from %s where a = ? and c >= ? and b in (?, ?)", "first", 6, 3, 2),
@@ -175,18 +175,43 @@ public class SingleColumnRelationTest extends CQLTester
         execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "first", 1, 1, 1);
         execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "first", 2, 2, 2);
         execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "first", 3, 3, 3);
+        execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "first", 4, 4, 4);
+        execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "second", 1, 1, 1);
         execute("insert into %s (a, b, c, d) values (?, ?, ?, ?)", "second", 4, 4, 4);
 
-        assertInvalidMessage("Partition KEY part a cannot be restricted by IN relation (only the last part of the partition key can)",
+        assertRows(execute("select * from %s where a = ? and b = ?", "first", 2),
+                   row("first", 2, 2, 2));
+
+        assertRows(execute("select * from %s where a in (?, ?) and b in (?, ?)", "first", "second", 2, 3),
+                   row("first", 2, 2, 2),
+                   row("first", 3, 3, 3));
+
+        assertRows(execute("select * from %s where a in (?, ?) and b = ?", "first", "second", 4),
+                   row("first", 4, 4, 4),
+                   row("second", 4, 4, 4));
+
+        assertRows(execute("select * from %s where a = ? and b in (?, ?)", "first", 3, 4),
+                   row("first", 3, 3, 3),
+                   row("first", 4, 4, 4));
+
+        assertRows(execute("select * from %s where a in (?, ?) and b in (?, ?)", "first", "second", 1, 4),
+                   row("first", 1, 1, 1),
+                   row("first", 4, 4, 4),
+                   row("second", 1, 1, 1),
+                   row("second", 4, 4, 4));
+
+        assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
                              "select * from %s where a in (?, ?)", "first", "second");
-        assertInvalidMessage("Partition KEY part a cannot be restricted by IN relation (only the last part of the partition key can)",
-                             "select * from %s where a in (?, ?) and b in (?, ?)", "first", "second", 2, 3);
         assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
                              "select * from %s where a = ?", "first");
         assertInvalidMessage("b cannot be restricted by more than one relation if it includes a IN",
                              "select * from %s where a = ? AND b IN (?, ?) AND b = ?", "first", 2, 2, 3);
         assertInvalidMessage("b cannot be restricted by more than one relation if it includes an Equal",
                              "select * from %s where a = ? AND b = ? AND b IN (?, ?)", "first", 2, 2, 3);
+        assertInvalidMessage("a cannot be restricted by more than one relation if it includes a IN",
+                             "select * from %s where a IN (?, ?) AND a = ? AND b = ?", "first", "second", "first", 3);
+        assertInvalidMessage("a cannot be restricted by more than one relation if it includes an Equal",
+                             "select * from %s where a = ? AND a IN (?, ?) AND b IN (?, ?)", "first", "second", "first", 2, 3);
     }
 
     @Test
@@ -384,6 +409,25 @@ public class SingleColumnRelationTest extends CQLTester
     }
 
     @Test
+    public void testINWithDuplicateValue() throws Throwable
+    {
+        for (String compactOption : new String[] { "", " WITH COMPACT STORAGE" })
+        {
+            createTable("CREATE TABLE %s (k1 int, k2 int, v int, PRIMARY KEY (k1, k2))" + compactOption);
+            execute("INSERT INTO %s (k1,  k2, v) VALUES (?, ?, ?)", 1, 1, 1);
+
+            assertRows(execute("SELECT * FROM %s WHERE k1 IN (?, ?)", 1, 1),
+                       row(1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE k1 IN (?, ?) AND k2 IN (?, ?)", 1, 1, 1, 1),
+                       row(1, 1, 1));
+
+            assertRows(execute("SELECT * FROM %s WHERE k1 = ? AND k2 IN (?, ?)", 1, 1, 1),
+                       row(1, 1, 1));
+        }
+    }
+
+    @Test
     public void testLargeClusteringINValues() throws Throwable
     {
         createTable("CREATE TABLE %s (k int, c int, v int, PRIMARY KEY (k, c))");
@@ -392,7 +436,118 @@ public class SingleColumnRelationTest extends CQLTester
         for (int i = 0; i < 10000; i++)
             inValues.add(i);
         assertRows(execute("SELECT * FROM %s WHERE k=? AND c IN ?", 0, inValues),
-                row(0, 0, 0)
+                row(0, 0, 0));
+    }
+
+    @Test
+    public void testMultiplePartitionKeyWithIndex() throws Throwable
+    {
+        createTable("CREATE TABLE %s (a int, b int, c int, d int, e int, f int, PRIMARY KEY ((a, b), c, d, e))");
+        createIndex("CREATE INDEX ON %s (c)");
+        createIndex("CREATE INDEX ON %s (f)");
+
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 0, 0, 0, 0);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 0, 1, 0, 1);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 0, 1, 1, 2);
+
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 1, 0, 0, 3);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 1, 1, 0, 4);
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 1, 1, 1, 5);
+
+        execute("INSERT INTO %s (a, b, c, d, e, f) VALUES (?, ?, ?, ?, ?, ?)", 0, 0, 2, 0, 0, 5);
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c = ?", 0, 1);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c = ? ALLOW FILTERING", 0, 1),
+                   row(0, 0, 1, 0, 0, 3),
+                   row(0, 0, 1, 1, 0, 4),
+                   row(0, 0, 1, 1, 1, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c = ? AND d = ?", 0, 1, 1);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c = ? AND d = ? ALLOW FILTERING", 0, 1, 1),
+                   row(0, 0, 1, 1, 0, 4),
+                   row(0, 0, 1, 1, 1, 5));
+
+        assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
+                             "SELECT * FROM %s WHERE a = ? AND c IN (?) AND  d IN (?) ALLOW FILTERING", 0, 1, 1);
+
+        assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
+                             "SELECT * FROM %s WHERE a = ? AND (c, d) >= (?, ?) ALLOW FILTERING", 0, 1, 1);
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c IN (?) AND f = ?", 0, 1, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c IN (?) AND f = ? ALLOW FILTERING", 0, 1, 5),
+                   row(0, 0, 1, 1, 1, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND f = ?", 0, 1, 2, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c IN (?, ?) AND f = ? ALLOW FILTERING", 0, 1, 2, 5),
+                   row(0, 0, 1, 1, 1, 5),
+                   row(0, 0, 2, 0, 0, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c IN (?) AND d IN (?) AND f = ?", 0, 1, 0, 3);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c IN (?) AND d IN (?) AND f = ? ALLOW FILTERING", 0, 1, 0, 3),
+                   row(0, 0, 1, 0, 0, 3));
+
+        assertInvalidMessage("Partition key parts: b must be restricted as other parts are",
+                             "SELECT * FROM %s WHERE a = ? AND c >= ? ALLOW FILTERING", 0, 1);
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c >= ? AND f = ?", 0, 1, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c >= ? AND f = ? ALLOW FILTERING", 0, 1, 5),
+                   row(0, 0, 1, 1, 1, 5),
+                   row(0, 0, 2, 0, 0, 5));
+
+        assertInvalidMessage("Cannot execute this query as it might involve data filtering",
+                             "SELECT * FROM %s WHERE a = ? AND c = ? AND d >= ? AND f = ?", 0, 1, 1, 5);
+        assertRows(execute("SELECT * FROM %s WHERE a = ? AND c = ? AND d >= ? AND f = ? ALLOW FILTERING", 0, 1, 1, 5),
+                   row(0, 0, 1, 1, 1, 5));
+    }
+
+    @Test
+    public void testFunctionCallWithUnset() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, s text, i int)");
+
+        assertInvalidMessage("Invalid unset value for argument in call to function token",
+                             "SELECT * FROM %s WHERE token(k) >= token(?)", unset());
+        assertInvalidMessage("Invalid unset value for argument in call to function blobasint",
+                             "SELECT * FROM %s WHERE k = blobAsInt(?)", unset());
+    }
+
+    @Test
+    public void testLimitWithUnset() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int PRIMARY KEY, i int)");
+        execute("INSERT INTO %s (k, i) VALUES (1, 1)");
+        execute("INSERT INTO %s (k, i) VALUES (2, 1)");
+        assertRows(execute("SELECT k FROM %s LIMIT ?", unset()), // treat as 'unlimited'
+                row(1),
+                row(2)
         );
+    }
+
+    @Test
+    public void testWithUnsetValues() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, i int, j int, s text, PRIMARY KEY(k,i,j))");
+        createIndex("CREATE INDEX s_index ON %s (s)");
+        // partition key
+        assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k = ?", unset());
+        assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k IN ?", unset());
+        assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k IN(?)", unset());
+        assertInvalidMessage("Invalid unset value for column k", "SELECT * from %s WHERE k IN(?,?)", 1, unset());
+        // clustering column
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i = ?", unset());
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i IN ?", unset());
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i IN(?)", unset());
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i IN(?,?)", 1, unset());
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE i = ? ALLOW FILTERING", unset());
+        // indexed column
+        assertInvalidMessage("Unsupported unset value for indexed column s", "SELECT * from %s WHERE s = ?", unset());
+        // range
+        assertInvalidMessage("Invalid unset value for column i", "SELECT * from %s WHERE k = 1 AND i > ?", unset());
     }
 }

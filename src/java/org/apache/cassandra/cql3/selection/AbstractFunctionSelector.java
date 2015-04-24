@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 
+import com.google.common.collect.Iterables;
 import org.apache.commons.lang3.text.StrBuilder;
 
 import org.apache.cassandra.cql3.functions.Function;
@@ -48,7 +49,7 @@ abstract class AbstractFunctionSelector<T extends Function> extends Selector
         else
         {
             if (factories.doesAggregation() && !factories.containsOnlyAggregateFunctions())
-                throw new InvalidRequestException(String.format("the %s function arguments must be either all aggregates or all none aggregates",
+                throw new InvalidRequestException(String.format("arguments of function %s must be either all aggregates or no aggregates",
                                                                 fun.name()));
         }
 
@@ -70,6 +71,11 @@ abstract class AbstractFunctionSelector<T extends Function> extends Selector
             public boolean usesFunction(String ksName, String functionName)
             {
                 return fun.usesFunction(ksName, functionName);
+            }
+
+            public Iterable<Function> getFunctions()
+            {
+                return Iterables.concat(fun.getFunctions(), factories.getFunctions());
             }
 
             public Selector newInstance() throws InvalidRequestException

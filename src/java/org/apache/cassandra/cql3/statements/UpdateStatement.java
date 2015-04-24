@@ -30,6 +30,8 @@ import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.Pair;
 
+import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
+
 /**
  * An <code>UPDATE</code> statement parsed from a CQL query statement.
  *
@@ -48,8 +50,19 @@ public class UpdateStatement extends ModificationStatement
         return true;
     }
 
-    public void addUpdateForKey(ColumnFamily cf, ByteBuffer key, Composite prefix, UpdateParameters params)
-    throws InvalidRequestException
+    public void addUpdateForKey(ColumnFamily cf,
+                                ByteBuffer key,
+                                Composite prefix,
+                                UpdateParameters params) throws InvalidRequestException
+    {
+        addUpdateForKey(cf, key, prefix, params, true);
+    }
+
+    public void addUpdateForKey(ColumnFamily cf,
+                                ByteBuffer key,
+                                Composite prefix,
+                                UpdateParameters params,
+                                boolean validateIndexedColumns) throws InvalidRequestException
     {
         // Inserting the CQL row marker (see #4361)
         // We always need to insert a marker for INSERT, because of the following situation:
@@ -98,6 +111,20 @@ public class UpdateStatement extends ModificationStatement
                 update.execute(key, cf, prefix, params);
         }
 
+        // validateIndexedColumns trigger a call to Keyspace.open() which we want to be able to avoid in some case
+        //(e.g. when using CQLSSTableWriter)
+        if (validateIndexedColumns)
+            validateIndexedColumns(cf);
+    }
+
+    /**
+     * Checks if the values of the indexed columns are valid.
+     *
+     * @param cf the column family
+     * @throws InvalidRequestException if one of the values of the indexed columns is not valid
+     */
+    private void validateIndexedColumns(ColumnFamily cf)
+    {
         SecondaryIndexManager indexManager = Keyspace.open(cfm.ksName).getColumnFamilyStore(cfm.cfId).indexManager;
         if (indexManager.hasIndexes())
         {
@@ -105,11 +132,11 @@ public class UpdateStatement extends ModificationStatement
             {
                 // Indexed values must be validated by any applicable index. See CASSANDRA-3057/4240/8081 for more details
                 if (!indexManager.validate(cell))
-                    throw new InvalidRequestException(String.format("Can't index column value of size %d for index %s on %s.%s",
-                                                                    cell.value().remaining(),
-                                                                    cfm.getColumnDefinition(cell.name()).getIndexName(),
-                                                                    cfm.ksName,
-                                                                    cfm.cfName));
+                    throw invalidRequest("Can't index column value of size %d for index %s on %s.%s",
+                                         cell.value().remaining(),
+                                         cfm.getColumnDefinition(cell.name()).getIndexName(),
+                                         cfm.ksName,
+                                         cfm.cfName);
             }
         }
     }
@@ -123,13 +150,15 @@ public class UpdateStatement extends ModificationStatement
          * A parsed <code>INSERT</code> statement.
          *
          * @param name column family being operated on
+         * @param attrs additional attributes for statement (CL, timestamp, timeToLive)
          * @param columnNames list of column names
          * @param columnValues list of column values (corresponds to names)
-         * @param attrs additional attributes for statement (CL, timestamp, timeToLive)
+         * @param ifNotExists true if an IF NOT EXISTS condition was specified, false otherwise
          */
         public ParsedInsert(CFName name,
                             Attributes.Raw attrs,
-                            List<ColumnIdentifier.Raw> columnNames, List<Term.Raw> columnValues,
+                            List<ColumnIdentifier.Raw> columnNames,
+                            List<Term.Raw> columnValues,
                             boolean ifNotExists)
         {
             super(name, attrs, null, ifNotExists, false);
@@ -139,16 +168,20 @@ public class UpdateStatement extends ModificationStatement
 
         protected ModificationStatement prepareInternal(CFMetaData cfm, VariableSpecifications boundNames, Attributes attrs) throws InvalidRequestException
         {
-            UpdateStatement stmt = new UpdateStatement(ModificationStatement.StatementType.INSERT,boundNames.size(), cfm, attrs);
+            UpdateStatement stmt = new UpdateStatement(ModificationStatement.StatementType.INSERT, boundNames.size(), cfm, attrs);
 
             // Created from an INSERT
             if (stmt.isCounter())
-                throw new InvalidRequestException("INSERT statement are not allowed on counter tables, use UPDATE instead");
-            if (columnNames.size() != columnValues.size())
-                throw new InvalidRequestException("Unmatched column names/values");
+                throw new InvalidRequestException("INSERT statements are not allowed on counter tables, use UPDATE instead");
+
+            if (columnNames == null)
+                throw new InvalidRequestException("Column names for INSERT must be provided when using VALUES");
             if (columnNames.isEmpty())
                 throw new InvalidRequestException("No columns provided to INSERT");
+            if (columnNames.size() != columnValues.size())
+                throw new InvalidRequestException("Unmatched column names/values");
 
+            String ks = keyspace();
             for (int i = 0; i < columnNames.size(); i++)
             {
                 ColumnIdentifier id = columnNames.get(i).prepare(cfm);
@@ -164,22 +197,54 @@ public class UpdateStatement extends ModificationStatement
                 }
 
                 Term.Raw value = columnValues.get(i);
-
-                switch (def.kind)
+                if (def.isPrimaryKeyColumn())
                 {
-                    case PARTITION_KEY:
-                    case CLUSTERING_COLUMN:
-                        Term t = value.prepare(keyspace(), def);
-                        t.collectMarkerSpecification(boundNames);
-                        stmt.addKeyValue(def, t);
-                        break;
-                    default:
-                        Operation operation = new Operation.SetValue(value).prepare(keyspace(), def);
-                        operation.collectMarkerSpecification(boundNames);
-                        stmt.addOperation(operation);
-                        break;
+                    Term t = value.prepare(ks, def);
+                    t.collectMarkerSpecification(boundNames);
+                    stmt.addKeyValue(def, t);
+                }
+                else
+                {
+                    Operation operation = new Operation.SetValue(value).prepare(ks, def);
+                    operation.collectMarkerSpecification(boundNames);
+                    stmt.addOperation(operation);
                 }
             }
+
+            return stmt;
+        }
+    }
+
+    /**
+     * A parsed INSERT JSON statement.
+     */
+    public static class ParsedInsertJson extends ModificationStatement.Parsed
+    {
+        private final Json.Raw jsonValue;
+
+        public ParsedInsertJson(CFName name, Attributes.Raw attrs, Json.Raw jsonValue, boolean ifNotExists)
+        {
+            super(name, attrs, null, ifNotExists, false);
+            this.jsonValue = jsonValue;
+        }
+
+        protected ModificationStatement prepareInternal(CFMetaData cfm, VariableSpecifications boundNames, Attributes attrs) throws InvalidRequestException
+        {
+            UpdateStatement stmt = new UpdateStatement(ModificationStatement.StatementType.INSERT, boundNames.size(), cfm, attrs);
+            if (stmt.isCounter())
+                throw new InvalidRequestException("INSERT statements are not allowed on counter tables, use UPDATE instead");
+
+            Collection<ColumnDefinition> defs = cfm.allColumns();
+            Json.Prepared prepared = jsonValue.prepareAndCollectMarkers(cfm, defs, boundNames);
+
+            for (ColumnDefinition def : defs)
+            {
+                if (def.isPrimaryKeyColumn())
+                    stmt.addKeyValue(def, prepared.getPrimaryKeyValueForColumn(def));
+                else
+                    stmt.addOperation(prepared.getSetOperationForColumn(def));
+            }
+
             return stmt;
         }
     }
@@ -198,14 +263,16 @@ public class UpdateStatement extends ModificationStatement
          * @param attrs additional attributes for statement (timestamp, timeToLive)
          * @param updates a map of column operations to perform
          * @param whereClause the where clause
-         */
+         * @param ifExists flag to check if row exists
+         * */
         public ParsedUpdate(CFName name,
                             Attributes.Raw attrs,
                             List<Pair<ColumnIdentifier.Raw, Operation.RawUpdate>> updates,
                             List<Relation> whereClause,
-                            List<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>> conditions)
+                            List<Pair<ColumnIdentifier.Raw, ColumnCondition.Raw>> conditions,
+                            boolean ifExists)
         {
-            super(name, attrs, conditions, false, false);
+            super(name, attrs, conditions, false, ifExists);
             this.updates = updates;
             this.whereClause = whereClause;
         }

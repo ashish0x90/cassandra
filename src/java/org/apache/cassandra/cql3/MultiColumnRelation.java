@@ -36,10 +36,12 @@ import static org.apache.cassandra.cql3.statements.RequestValidations.invalidReq
 /**
  * A relation using the tuple notation, which typically affects multiple columns.
  * Examples:
+ * {@code
  *  - SELECT ... WHERE (a, b, c) > (1, 'a', 10)
  *  - SELECT ... WHERE (a, b, c) IN ((1, 2, 3), (4, 5, 6))
  *  - SELECT ... WHERE (a, b) < ?
  *  - SELECT ... WHERE (a, b) IN ?
+ * }
  */
 public class MultiColumnRelation extends Relation
 {
@@ -65,7 +67,9 @@ public class MultiColumnRelation extends Relation
 
     /**
      * Creates a multi-column EQ, LT, LTE, GT, or GTE relation.
+     * {@code
      * For example: "SELECT ... WHERE (a, b) > (0, 1)"
+     * }
      * @param entities the columns on the LHS of the relation
      * @param relationType the relation operator
      * @param valuesOrMarker a Tuples.Literal instance or a Tuples.Raw marker
@@ -127,7 +131,7 @@ public class MultiColumnRelation extends Relation
     {
         List<ColumnDefinition> receivers = receivers(cfm);
         Term term = toTerm(receivers, getValue(), cfm.ksName, boundNames);
-        return new MultiColumnRestriction.EQ(cfm.comparator, receivers, term);
+        return new MultiColumnRestriction.EQ(receivers, term);
     }
 
     @Override
@@ -139,9 +143,9 @@ public class MultiColumnRelation extends Relation
         if (terms == null)
         {
             Term term = toTerm(receivers, getValue(), cfm.ksName, boundNames);
-            return new MultiColumnRestriction.InWithMarker(cfm.comparator, receivers, (AbstractMarker) term);
+            return new MultiColumnRestriction.InWithMarker(receivers, (AbstractMarker) term);
         }
-        return new MultiColumnRestriction.InWithValues(cfm.comparator, receivers, terms);
+        return new MultiColumnRestriction.InWithValues(receivers, terms);
     }
 
     @Override
@@ -152,7 +156,7 @@ public class MultiColumnRelation extends Relation
     {
         List<ColumnDefinition> receivers = receivers(cfm);
         Term term = toTerm(receivers(cfm), getValue(), cfm.ksName, boundNames);
-        return new MultiColumnRestriction.Slice(cfm.comparator, receivers, bound, inclusive, term);
+        return new MultiColumnRestriction.Slice(receivers, bound, inclusive, term);
     }
 
     @Override
@@ -185,12 +189,9 @@ public class MultiColumnRelation extends Relation
             checkFalse(names.contains(def), "Column \"%s\" appeared twice in a relation: %s", def.name, this);
 
             // check that no clustering columns were skipped
-            if (def.position() != previousPosition + 1)
-            {
-                checkFalse(previousPosition == -1, "Clustering columns may not be skipped in multi-column relations. " +
-                                                   "They should appear in the PRIMARY KEY order. Got %s", this);
-                throw invalidRequest("Clustering columns must appear in the PRIMARY KEY order in multi-column relations: %s", this);
-            }
+            checkFalse(previousPosition != -1 && def.position() != previousPosition + 1,
+                       "Clustering columns must appear in the PRIMARY KEY order in multi-column relations: %s", this);
+
             names.add(def);
             previousPosition = def.position();
         }

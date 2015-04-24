@@ -33,9 +33,9 @@ import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.io.sstable.format.SSTableWriter;
-import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
+
+import org.apache.cassandra.utils.concurrent.Refs;
 
 /**
  * Task that manages receiving files for the session for certain ColumnFamily.
@@ -115,7 +115,7 @@ public class StreamReceiveTask extends StreamTask
             }
             ColumnFamilyStore cfs = Keyspace.open(kscf.left).getColumnFamilyStore(kscf.right);
 
-            File lockfiledir = cfs.directories.getWriteableLocationAsFile(task.sstables.size() * 256);
+            File lockfiledir = cfs.directories.getWriteableLocationAsFile(task.sstables.size() * 256L);
             if (lockfiledir == null)
                 throw new IOError(new IOException("All disks full"));
             StreamLockfile lockfile = new StreamLockfile(lockfiledir, UUID.randomUUID());
@@ -126,17 +126,11 @@ public class StreamReceiveTask extends StreamTask
             lockfile.delete();
             task.sstables.clear();
 
-            if (!SSTableReader.acquireReferences(readers))
-                throw new AssertionError("We shouldn't fail acquiring a reference on a sstable that has just been transferred");
-            try
+            try (Refs<SSTableReader> refs = Refs.ref(readers))
             {
                 // add sstables and build secondary indexes
                 cfs.addSSTables(readers);
                 cfs.indexManager.maybeBuildSecondaryIndexes(readers, cfs.indexManager.allIndexesNames());
-            }
-            finally
-            {
-                SSTableReader.releaseReferences(readers);
             }
 
             task.session.taskCompleted(task);

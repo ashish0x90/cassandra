@@ -21,7 +21,6 @@ package org.apache.cassandra.tracing;
 
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,17 +29,11 @@ import java.util.concurrent.ConcurrentMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.TimeUUIDType;
-import org.apache.cassandra.exceptions.OverloadedException;
-import org.apache.cassandra.exceptions.UnavailableException;
-import org.apache.cassandra.exceptions.WriteTimeoutException;
 import org.apache.cassandra.net.MessageIn;
 import org.apache.cassandra.net.MessagingService;
-import org.apache.cassandra.service.StorageProxy;
+import org.apache.cassandra.transport.Connection;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.UUIDGen;
 
@@ -53,7 +46,6 @@ public class Tracing
 {
     public static final String TRACE_HEADER = "TraceSession";
     public static final String TRACE_TYPE = "TraceType";
-    public static final String TRACE_TTL = "TraceTTL";
 
     public enum TraceType
     {
@@ -85,7 +77,7 @@ public class Tracing
         }
     }
 
-    private static final Logger logger = LoggerFactory.getLogger(Tracing.class);
+    static final Logger logger = LoggerFactory.getLogger(Tracing.class);
 
     private final InetAddress localAddress = FBUtilities.getLocalAddress();
 
@@ -121,26 +113,31 @@ public class Tracing
         return instance.state.get() != null;
     }
 
-    public UUID newSession()
+    public UUID newSession(Connection connection)
     {
-        return newSession(TraceType.QUERY);
+        return newSession(connection, TraceType.QUERY);
     }
 
     public UUID newSession(TraceType traceType)
     {
-        return newSession(TimeUUIDType.instance.compose(ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes())), traceType);
+        return newSession(null, traceType);
     }
 
-    public UUID newSession(UUID sessionId)
+    public UUID newSession(Connection connection, TraceType traceType)
     {
-        return newSession(sessionId, TraceType.QUERY);
+        return newSession(connection, TimeUUIDType.instance.compose(ByteBuffer.wrap(UUIDGen.getTimeUUIDBytes())), traceType, false);
     }
 
-    public UUID newSession(UUID sessionId, TraceType traceType)
+    public UUID newSession(Connection connection, UUID sessionId)
+    {
+        return newSession(connection, sessionId, TraceType.QUERY, true);
+    }
+
+    private UUID newSession(Connection connection, UUID sessionId, TraceType traceType, boolean withFinishEvent)
     {
         assert state.get() == null;
 
-        TraceState ts = new TraceState(localAddress, sessionId, traceType);
+        TraceState ts = new TraceState(localAddress, connection, sessionId, traceType, withFinishEvent);
         state.set(ts);
         sessions.put(sessionId, ts);
 
@@ -169,13 +166,7 @@ public class Tracing
             final ByteBuffer sessionId = state.sessionIdBytes;
             final int ttl = state.ttl;
 
-            StageManager.getStage(Stage.TRACING).execute(new Runnable()
-            {
-                public void run()
-                {
-                    mutateWithCatch(TraceKeyspace.toStopSessionMutation(sessionId, elapsed, ttl));
-                }
-            });
+            state.executeMutation(TraceKeyspace.makeStopSessionMutation(sessionId, elapsed, ttl));
 
             state.stop();
             sessions.remove(state.sessionId);
@@ -200,6 +191,11 @@ public class Tracing
 
     public TraceState begin(final String request, final Map<String, String> parameters)
     {
+        return begin(request, null, parameters);
+    }
+
+    public TraceState begin(final String request, final InetAddress client, final Map<String, String> parameters)
+    {
         assert isTracing();
 
         final TraceState state = this.state.get();
@@ -208,13 +204,7 @@ public class Tracing
         final String command = state.traceType.toString();
         final int ttl = state.ttl;
 
-        StageManager.getStage(Stage.TRACING).execute(new Runnable()
-        {
-            public void run()
-            {
-                mutateWithCatch(TraceKeyspace.toStartSessionMutation(sessionId, parameters, request, startedAt, command, ttl));
-            }
-        });
+        state.executeMutation(TraceKeyspace.makeStartSessionMutation(sessionId, client, parameters, request, startedAt, command, ttl));
 
         return state;
     }
@@ -294,29 +284,12 @@ public class Tracing
         state.trace(format, arg1, arg2);
     }
 
-    public static void trace(String format, Object[] args)
+    public static void trace(String format, Object... args)
     {
         final TraceState state = instance.get();
         if (state == null) // inline isTracing to avoid implicit two calls to state.get()
             return;
 
         state.trace(format, args);
-    }
-
-    static void mutateWithCatch(Mutation mutation)
-    {
-        try
-        {
-            StorageProxy.mutate(Arrays.asList(mutation), ConsistencyLevel.ANY);
-        }
-        catch (UnavailableException | WriteTimeoutException e)
-        {
-            // should never happen; ANY does not throw UAE or WTE
-            throw new AssertionError(e);
-        }
-        catch (OverloadedException e)
-        {
-            logger.warn("Too many nodes are overloaded to save trace events");
-        }
     }
 }

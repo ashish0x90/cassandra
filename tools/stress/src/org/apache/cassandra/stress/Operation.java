@@ -105,9 +105,9 @@ public abstract class Operation
                     break;
 
                 if (spec.useRatio == null)
-                    success = partitionCache.get(i).reset(seed, spec.targetCount, this);
+                    success = partitionCache.get(i).reset(seed, spec.targetCount, isWrite());
                 else
-                    success = partitionCache.get(i).reset(seed, spec.useRatio.next(), this);
+                    success = partitionCache.get(i).reset(seed, spec.useRatio.next(), isWrite());
             }
         }
         partitionCount = i;
@@ -176,7 +176,7 @@ public abstract class Operation
             }
         }
 
-        timer.stop(run.partitionCount(), run.rowCount());
+        timer.stop(run.partitionCount(), run.rowCount(), !success);
 
         if (!success)
         {

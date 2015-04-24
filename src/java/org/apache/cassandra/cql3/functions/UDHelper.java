@@ -20,9 +20,6 @@ package org.apache.cassandra.cql3.functions;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.reflect.Method;
-import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.*;
 
 import org.slf4j.Logger;
@@ -30,13 +27,12 @@ import org.slf4j.LoggerFactory;
 
 import com.datastax.driver.core.DataType;
 import org.apache.cassandra.cql3.*;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.db.marshal.*;
 
 /**
  * Helper class for User Defined Functions + Aggregates.
  */
-final class UDHelper
+public final class UDHelper
 {
     protected static final Logger logger = LoggerFactory.getLogger(UDHelper.class);
 
@@ -65,7 +61,7 @@ final class UDHelper
      */
     public static Class<?>[] javaTypes(DataType[] dataTypes)
     {
-        Class<?> paramTypes[] = new Class[dataTypes.length];
+        Class<?>[] paramTypes = new Class[dataTypes.length];
         for (int i = 0; i < paramTypes.length; i++)
             paramTypes[i] = dataTypes[i].asJavaClass();
         return paramTypes;
@@ -105,19 +101,5 @@ final class UDHelper
         {
             throw new RuntimeException("cannot parse driver type " + cqlType.getType().toString(), e);
         }
-    }
-
-    // We allow method overloads, so a function is not uniquely identified by its name only, but
-    // also by its argument types. To distinguish overloads of given function name in the schema
-    // we use a "signature" which is just a SHA-1 of it's argument types (we could replace that by
-    // using a "signature" UDT that would be comprised of the function name and argument types,
-    // which we could then use as clustering column. But as we haven't yet used UDT in system tables,
-    // We'll left that decision to #6717).
-    protected static ByteBuffer computeSignature(List<AbstractType<?>> argTypes)
-    {
-        MessageDigest digest = FBUtilities.newMessageDigest("SHA-1");
-        for (AbstractType<?> type : argTypes)
-            digest.update(type.asCQL3Type().toString().getBytes(StandardCharsets.UTF_8));
-        return ByteBuffer.wrap(digest.digest());
     }
 }

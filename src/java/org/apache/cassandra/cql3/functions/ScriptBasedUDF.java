@@ -35,6 +35,7 @@ import javax.script.SimpleBindings;
 
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.exceptions.FunctionExecutionException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 
 public class ScriptBasedUDF extends UDFunction
@@ -138,8 +139,8 @@ public class ScriptBasedUDF extends UDFunction
         }
         catch (RuntimeException | ScriptException e)
         {
-            logger.info("Execution of UDF '{}' failed", name, e);
-            throw new InvalidRequestException("Execution of user-defined function '" + name + "' failed: " + e);
+            logger.debug("Execution of UDF '{}' failed", name, e);
+            throw FunctionExecutionException.create(this, e);
         }
     }
 }
